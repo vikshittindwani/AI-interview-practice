@@ -469,7 +469,7 @@ export default function App() {
     try {
       const controller = new AbortController();
       timeoutId = window.setTimeout(() => controller.abort(), 30000);
-      const response = await fetch("/api/generate", {
+      const response = await fetch("https://ai-interview-practice-j164.onrender.com/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
