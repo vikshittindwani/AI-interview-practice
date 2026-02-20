@@ -1,8 +1,6 @@
 {
   "sess-1771304232807-rd0lc55u": {
     "questions": [
-      "How would you identify highly correlated features in a dataset, and why might you want to address them before training a linear model?",
-      "के‑नियरस्ट नेबर (K‑NN) एल्गोरिदम का मूल सिद्धांत क्या है, और वर्गीकरण में उपयुक्त K मान चुनने के लिए आप क्या विचार करेंगे?",
       "एक श्रेणीबद्ध फीचर को 0‑1 वेक्टर में बदलने (one‑hot encoding) की प्रक्रिया बताइए,",
       "Explain the difference between batch gradient descent, stochastic gradient descent, and mini‑batch gradient descent. When might you prefer each approach?",
       "You have a dataset that",
@@ -40,8 +38,10 @@
       "How would you transform a high‑cardinality categorical feature so that it can be used effectively with a linear regression model?",
       "How would you explain the bias‑variance trade‑off to a teammate, and what simple experiment could you run to see its effect on a model’s performance?",
       "What distinguishes a parametric model from a non‑parametric model, and can you cite a simple example of each?",
-      "एक बाइनरी क्लासिफ़ायर में निर्णय सीमा (threshold) तय करने के लिए सरलतम तरीका क्या हो सकता है, और उसका प्रभाव आप कैसे मापेंगे?"
+      "एक बाइनरी क्लासिफ़ायर में निर्णय सीमा (threshold) तय करने के लिए सरलतम तरीका क्या हो सकता है, और उसका प्रभाव आप कैसे मापेंगे?",
+      "When training a model, why do we split the data into training, validation, and test sets, and what does each set help us evaluate?",
+      "What is a learning rate in gradient‑based optimization, and what are the typical consequences of setting it too high or too low?"
     ],
-    "updatedAt": 1771392040456
+    "updatedAt": 1771570962658
   }
 }
