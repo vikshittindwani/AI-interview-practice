@@ -10,7 +10,7 @@ AI-powered mock interview studio with:
 
 This repo has two apps:
 - `client/` React + Vite frontend
-- `server/` Express backend (Groq + Murf integrations)
+- `server/` Express backend (Groq + Sarvam integrations)
 
 ## Tech Stack
 - Frontend: React 18, Vite
@@ -116,3 +116,4 @@ If `client/dist` exists, the Express server serves it automatically.
 
 ## License
 No license file is currently included. Add one (for example, MIT) before publishing publicly.
+
