@@ -2,6 +2,8 @@
 
 const tracks = ["System Design", "ML Fundamentals", "Behavioral", "Product Sense"];
 const levels = ["Entry", "Mid", "Senior", "Staff"];
+const interviewers = ["Priya Shah", "Neha Verma", "Ananya Iyer", "Kavya Menon"];
+const ANSWER_PAUSE_LIMIT_SECONDS = 5;
 
 export default function App() {
   const [questions, setQuestions] = useState([]);
@@ -20,19 +22,29 @@ export default function App() {
   const [score, setScore] = useState(null);
   const [assistantLang, setAssistantLang] = useState("");
   const [onHold, setOnHold] = useState(false);
+  const [interviewerName, setInterviewerName] = useState(interviewers[0]);
+  const [targetQuestions, setTargetQuestions] = useState(5);
+  const [questionsCompleted, setQuestionsCompleted] = useState(0);
+  const [questionTimeLeft, setQuestionTimeLeft] = useState(90);
+  const [isCallPage, setIsCallPage] = useState(false);
+  const [answerPauseLeft, setAnswerPauseLeft] = useState(ANSWER_PAUSE_LIMIT_SECONDS);
+  const [answerPauseArmed, setAnswerPauseArmed] = useState(false);
 
   const [stream, setStream] = useState(null);
   const [recording, setRecording] = useState(false);
-  const [micOn, setMicOn] = useState(true);
-  const [camOn, setCamOn] = useState(true);
+  const [micOn, setMicOn] = useState(false);
+  const [camOn, setCamOn] = useState(false);
   const [uploadState, setUploadState] = useState("Idle");
   const [interviewStarted, setInterviewStarted] = useState(false);
   const [interviewElapsed, setInterviewElapsed] = useState(0);
   const recordingTimerRef = useRef(null);
 
   const recorderRef = useRef(null);
+  const sarvamRecorderRef = useRef(null);
+  const sarvamChunksRef = useRef([]);
   const chunksRef = useRef([]);
-  const videoRef = useRef(null);
+  const callVideoRef = useRef(null);
+  const lobbyVideoRef = useRef(null);
   const recognitionRef = useRef(null);
   const speechBufferRef = useRef("");
   const speechInterimRef = useRef("");
@@ -42,11 +54,13 @@ export default function App() {
   const pendingSubmitRef = useRef(false);
   const autoVoiceInterviewRef = useRef(false);
   const manualDictationStopRef = useRef(false);
+  const manualDictationActiveRef = useRef(false);
   const awaitingNextDecisionRef = useRef(false);
   const pendingDecisionRef = useRef(null);
   const decisionBufferRef = useRef("");
   const decisionTimeoutRef = useRef(null);
   const autoSubmitTimerRef = useRef(null);
+  const stopSubmitFallbackRef = useRef(null);
   const submitInFlightRef = useRef(false);
   const serverAudioRef = useRef(null);
   const settingsTimerRef = useRef(null);
@@ -58,12 +72,19 @@ export default function App() {
   const [speechState, setSpeechState] = useState("");
   const [ttsSupported, setTtsSupported] = useState(false);
   const [ttsState, setTtsState] = useState("");
+  const [sarvamRecording, setSarvamRecording] = useState(false);
+  const [sarvamBusy, setSarvamBusy] = useState(false);
   const autoListenRef = useRef(false);
   const speechSupportedRef = useRef(false);
   const listeningRef = useRef(false);
   const assistantLangRef = useRef("");
   const onHoldRef = useRef(false);
   const holdTimerRef = useRef(null);
+  const completedCountRef = useRef(0);
+  const lastAnswerActivityRef = useRef(Date.now());
+  const noResponseInFlightRef = useRef(false);
+  const answerPauseArmedRef = useRef(false);
+  const stopAfterSubmitRef = useRef(false);
 
   const showToast = (message) => {
     setToast(message);
@@ -98,6 +119,37 @@ export default function App() {
       window.clearTimeout(holdTimerRef.current);
       holdTimerRef.current = null;
     }
+  };
+
+  const getRoundTimeLimit = () => 90;
+
+  const formatCountdown = (seconds) => {
+    const safe = Math.max(0, Number(seconds) || 0);
+    const mins = Math.floor(safe / 60);
+    const secs = safe % 60;
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const waitFor = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const markAnswerActivity = () => {
+    lastAnswerActivityRef.current = Date.now();
+    if (!answerPauseArmedRef.current) return;
+    setAnswerPauseLeft(ANSWER_PAUSE_LIMIT_SECONDS);
+  };
+
+  const disarmAnswerPauseTimer = () => {
+    answerPauseArmedRef.current = false;
+    setAnswerPauseArmed(false);
+    lastAnswerActivityRef.current = Date.now();
+    setAnswerPauseLeft(ANSWER_PAUSE_LIMIT_SECONDS);
+  };
+
+  const armAnswerPauseTimer = () => {
+    answerPauseArmedRef.current = true;
+    setAnswerPauseArmed(true);
+    lastAnswerActivityRef.current = Date.now();
+    setAnswerPauseLeft(ANSWER_PAUSE_LIMIT_SECONDS);
   };
 
   const scheduleHoldTimer = () => {
@@ -154,8 +206,17 @@ export default function App() {
     setAssistantLang(nextLang);
     if (nextLang === "hi") {
       showToast("Language set to Hindi.");
+    } else if (nextLang === "hinglish") {
+      showToast("Language set to Hinglish.");
     } else {
       showToast("Language set to English.");
+    }
+  };
+
+  const clearStopSubmitFallback = () => {
+    if (stopSubmitFallbackRef.current) {
+      window.clearTimeout(stopSubmitFallbackRef.current);
+      stopSubmitFallbackRef.current = null;
     }
   };
 
@@ -198,10 +259,31 @@ export default function App() {
   const startInterview = ({ fromRecording = false } = {}) => {
     setInterviewStarted(true);
     setInterviewElapsed(0);
+    setQuestionsCompleted(0);
+    completedCountRef.current = 0;
+    setQuestionTimeLeft(getRoundTimeLimit());
+    disarmAnswerPauseTimer();
+    setSubmitState("Interviewer joined");
+    setFeedback("");
+    setScore(null);
     if (!fromRecording) {
       setUploadState("Interview started");
     }
-    showToast("Mock interview started.");
+    showToast(`${interviewerName} joined the interview.`);
+  };
+
+  const markQuestionCompleted = () => {
+    const next = Math.min(targetQuestions, completedCountRef.current + 1);
+    completedCountRef.current = next;
+    setQuestionsCompleted(next);
+    if (next >= targetQuestions) {
+      setSubmitState("Round complete");
+      pauseVoiceLoop({ message: "Interview round complete." });
+      showToast("Round complete.");
+      return true;
+    }
+    setQuestionTimeLeft(getRoundTimeLimit());
+    return false;
   };
 
   const pauseVoiceLoop = ({ message = "Voice loop paused." } = {}) => {
@@ -215,14 +297,18 @@ export default function App() {
     clearHoldTimer();
     clearDecisionTimer();
     clearAutoSubmitTimer();
+    disarmAnswerPauseTimer();
+    stopAfterSubmitRef.current = false;
     autoListenRef.current = false;
     setSubmitState("Paused");
     setSpeechState("Paused");
+    manualDictationActiveRef.current = false;
     try {
       recognitionRef.current?.stop();
     } catch {
       // no-op
     }
+    stopSarvamDictation();
     if (serverAudioRef.current) {
       serverAudioRef.current.pause();
       serverAudioRef.current = null;
@@ -252,7 +338,7 @@ export default function App() {
       }
       clearAnswerDraft();
       setSubmitState("Generating next question...");
-      void generateQuestions({ silent: true });
+      void generateQuestions({ mode: "next", silent: true });
       return;
     }
 
@@ -273,15 +359,13 @@ export default function App() {
     }, 3500);
   };
 
-  const ensureStream = async () => {
+  const ensureStream = async ({ audio = micOn, video = camOn } = {}) => {
     if (stream) return stream;
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: true,
-    });
+    if (!audio && !video) return null;
+    const newStream = await navigator.mediaDevices.getUserMedia({ audio, video });
     newStream.getTracks().forEach((trackItem) => {
-      if (trackItem.kind === "audio") trackItem.enabled = micOn;
-      if (trackItem.kind === "video") trackItem.enabled = camOn;
+      if (trackItem.kind === "audio") trackItem.enabled = audio;
+      if (trackItem.kind === "video") trackItem.enabled = video;
     });
     setStream(newStream);
     return newStream;
@@ -290,24 +374,55 @@ export default function App() {
   const toggleTrack = async (kind) => {
     const active = kind === "audio" ? micOn : camOn;
     const next = !active;
-
-    const current = stream || (await ensureStream());
-    current.getTracks().forEach((trackItem) => {
-      if (trackItem.kind === kind) {
-        trackItem.enabled = next;
+    if (!next) {
+      const otherOn = kind === "audio" ? camOn : micOn;
+      if (stream) {
+        stream.getTracks().forEach((trackItem) => {
+          if (trackItem.kind === kind) trackItem.enabled = false;
+        });
+        if (!otherOn) {
+          stream.getTracks().forEach((trackItem) => trackItem.stop());
+          setStream(null);
+        }
       }
-    });
+      if (kind === "audio") setMicOn(false);
+      if (kind === "video") setCamOn(false);
+      return;
+    }
 
-    if (kind === "audio") setMicOn(next);
-    if (kind === "video") setCamOn(next);
+    try {
+      const requested = await navigator.mediaDevices.getUserMedia({
+        audio: kind === "audio",
+        video: kind === "video",
+      });
+      const current = stream || new MediaStream();
+      const existing = kind === "audio" ? current.getAudioTracks() : current.getVideoTracks();
+      existing.forEach((trackItem) => {
+        current.removeTrack(trackItem);
+        trackItem.stop();
+      });
+      const incoming = kind === "audio" ? requested.getAudioTracks() : requested.getVideoTracks();
+      incoming.forEach((trackItem) => {
+        trackItem.enabled = true;
+        current.addTrack(trackItem);
+      });
+      setStream(current);
+      if (kind === "audio") setMicOn(true);
+      if (kind === "video") setCamOn(true);
+    } catch {
+      showToast(kind === "audio" ? "Microphone permission denied." : "Camera permission denied.");
+    }
   };
 
   const startRecording = async () => {
     setError("");
-    const current = await ensureStream();
-    if (videoRef.current) {
-      videoRef.current.srcObject = current;
+    const current = await ensureStream({ audio: true, video: true });
+    if (!current) {
+      showToast("Allow camera and mic access to record.");
+      return;
     }
+    if (callVideoRef.current) callVideoRef.current.srcObject = current;
+    if (lobbyVideoRef.current) lobbyVideoRef.current.srcObject = current;
 
     chunksRef.current = [];
     const recorder = new MediaRecorder(current, {
@@ -363,9 +478,102 @@ export default function App() {
     setRecording(false);
   };
 
+  const getAudioRecorderMimeType = () => {
+    if (typeof MediaRecorder === "undefined") return "";
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+    const supported = candidates.find((item) => MediaRecorder.isTypeSupported(item));
+    return supported || "";
+  };
+
+  const startSarvamDictation = async () => {
+    if (sarvamBusy || sarvamRecording) return;
+    setSpeechState("Recording for Sarvam...");
+    try {
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const mimeType = getAudioRecorderMimeType();
+      const recorder = mimeType ? new MediaRecorder(micStream, { mimeType }) : new MediaRecorder(micStream);
+      sarvamChunksRef.current = [];
+      sarvamRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          sarvamChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = async () => {
+        setSarvamRecording(false);
+        const blob = new Blob(sarvamChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+        micStream.getTracks().forEach((trackItem) => trackItem.stop());
+        sarvamRecorderRef.current = null;
+        sarvamChunksRef.current = [];
+        if (!blob.size) {
+          setSpeechState("No audio captured");
+          return;
+        }
+
+        const formData = new FormData();
+        const extension = blob.type.includes("mp4") ? "m4a" : "webm";
+        formData.append("audio", new File([blob], `dictation-${Date.now()}.${extension}`, { type: blob.type }));
+        formData.append("language", assistantLangRef.current || "en");
+
+        setSarvamBusy(true);
+        setSpeechState("Transcribing with Sarvam...");
+        try {
+          const response = await fetch("/api/transcribe", {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) {
+            throw new Error("Transcription failed");
+          }
+          const data = await response.json();
+          const transcript = String(data.transcript || "").trim();
+          if (!transcript) {
+            setSpeechState("No transcript returned");
+            return;
+          }
+          const combined = [answerRef.current, transcript].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+          setAnswer(combined);
+          answerRef.current = combined;
+          setSpeechState("Sarvam transcript ready");
+          showToast("Sarvam STT captured.");
+        } catch {
+          setSpeechState("Sarvam STT failed");
+          showToast("Sarvam transcription failed.");
+        } finally {
+          setSarvamBusy(false);
+        }
+      };
+
+      recorder.start();
+      setSarvamRecording(true);
+      showToast("Sarvam recording started.");
+    } catch {
+      setSpeechState("Could not access microphone");
+      setSarvamRecording(false);
+    }
+  };
+
+  const stopSarvamDictation = () => {
+    if (!sarvamRecorderRef.current || sarvamRecorderRef.current.state === "inactive") return;
+    sarvamRecorderRef.current.stop();
+    setSpeechState("Finishing Sarvam recording...");
+  };
+
+  const toggleSarvamDictation = () => {
+    if (sarvamRecording) {
+      stopSarvamDictation();
+      return;
+    }
+    startSarvamDictation();
+  };
+
   const submitAnswerWithSpeech = async () => {
+    clearStopSubmitFallback();
     if (listening && recognitionRef.current) {
       pendingSubmitRef.current = true;
+      manualDictationActiveRef.current = false;
       recognitionRef.current.stop();
       setSpeechState("Stopping...");
       return;
@@ -383,6 +591,8 @@ export default function App() {
     if (!recognition) return;
 
     if (!listening) {
+      clearStopSubmitFallback();
+      manualDictationActiveRef.current = true;
       manualDictationStopRef.current = false;
       baseAnswerRef.current = answer;
       speechBufferRef.current = "";
@@ -391,7 +601,7 @@ export default function App() {
         recognition.start();
         setListening(true);
         listeningRef.current = true;
-        setSpeechState("Listening...");
+        setSpeechState("Realtime listening...");
       } catch {
         setSpeechState("Could not start speech recognition.");
         setListening(false);
@@ -400,10 +610,31 @@ export default function App() {
       return;
     }
 
+    manualDictationActiveRef.current = false;
     manualDictationStopRef.current = true;
     autoListenRef.current = false;
-    recognition.stop();
+    const shouldAutoSubmit = Boolean(currentQuestion.trim() && answerRef.current.trim());
+    if (shouldAutoSubmit) {
+      pendingSubmitRef.current = true;
+      setSpeechState("Submitting...");
+    }
+    try {
+      recognition.stop();
+    } catch {
+      // no-op
+    }
     setListening(false);
+
+    if (shouldAutoSubmit) {
+      clearStopSubmitFallback();
+      // Some browsers occasionally miss onend after stop(); fallback to ensure submit.
+      stopSubmitFallbackRef.current = window.setTimeout(() => {
+        if (submitInFlightRef.current) return;
+        if (!pendingSubmitRef.current) return;
+        pendingSubmitRef.current = false;
+        void submitAnswer();
+      }, 800);
+    }
   };
 
   const startDictation = () => {
@@ -444,10 +675,16 @@ export default function App() {
     startDictationWithRetry();
   };
 
-  const generateQuestions = async ({ silent = false, autoStartVoice = true, autoStartInterview = true } = {}) => {
+  const generateQuestions = async ({
+    mode = "next",
+    answerText = "",
+    silent = false,
+    autoStartVoice = true,
+    autoStartInterview = true,
+  } = {}) => {
     if (!role.trim() || !track || !level) {
       if (!silent) showToast("Set role, track, and level first.");
-      return;
+      return false;
     }
     const language = assistantLangRef.current || "en";
     if (autoStartInterview && !interviewStarted) {
@@ -463,35 +700,87 @@ export default function App() {
     decisionBufferRef.current = "";
     setOnHold(false);
     clearHoldTimer();
+    disarmAnswerPauseTimer();
     setLoading(true);
+    setSubmitState("Generating next question...");
     setError("");
-    let timeoutId = null;
+    const previousQuestion = String(currentQuestion || "").trim();
+    const normalizedPrevious = previousQuestion.toLowerCase();
+    const recentQuestions = [...recentQuestionsRef.current.slice(-20), previousQuestion]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
     try {
-      const controller = new AbortController();
-      timeoutId = window.setTimeout(() => controller.abort(), 30000);
-      const response = await fetch("https://ai-interview-practice-j164.onrender.com/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          role,
-          track,
-          level,
-          language,
-          sessionId: getOrCreateSessionId(),
-          recentQuestions: recentQuestionsRef.current.slice(-8),
-          count: 1,
-          nonce: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        }),
-      });
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || "Failed to generate");
+      const endpoint =
+        mode === "followup" ? "/api/question/followup" : mode === "initial" ? "/api/generate" : "/api/question/next";
+      const payload = {
+        role,
+        track,
+        level,
+        language,
+        sessionId: getOrCreateSessionId(),
+        recentQuestions,
+        nonce: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      };
+      if (mode === "followup") {
+        payload.question = currentQuestion;
+        payload.answer = String(answerText || "").trim();
+      } else if (mode === "initial") {
+        payload.count = 2;
       }
-      const data = await response.json();
-      if (data.questions?.length) {
-        setQuestions(data.questions);
-        setCurrentQuestion(data.questions[0]);
+      let data = null;
+      let lastError = null;
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            const detail = await response.text();
+            const retryable = response.status === 429 || response.status === 503 || response.status === 504;
+            if (retryable && attempt < maxAttempts) {
+              setSubmitState("Rate limited, retrying...");
+              await waitFor(700 * attempt + Math.floor(Math.random() * 300));
+              continue;
+            }
+            const failure = new Error(detail || `Failed to generate (${response.status})`);
+            failure.status = response.status;
+            throw failure;
+          }
+          data = await response.json();
+          lastError = null;
+          break;
+        } catch (error) {
+          const timedOut = error?.name === "AbortError";
+          if (timedOut && attempt < maxAttempts) {
+            setSubmitState("Timed out, retrying...");
+            await waitFor(700 * attempt + Math.floor(Math.random() * 300));
+            continue;
+          }
+          lastError = error;
+          break;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+      if (lastError) throw lastError;
+      if (!data) throw new Error("No response received");
+      const candidateQuestions = Array.isArray(data.questions)
+        ? data.questions
+        : data.question
+        ? [data.question]
+        : [];
+      if (candidateQuestions.length) {
+        const nextQuestion =
+          candidateQuestions.find((item) => String(item || "").trim().toLowerCase() !== normalizedPrevious) ||
+          candidateQuestions[0];
+        setQuestions(candidateQuestions);
+        setCurrentQuestion(nextQuestion);
         clearAnswerDraft();
         setFeedback("");
         setScore(null);
@@ -499,22 +788,48 @@ export default function App() {
         if (!silent) {
           showToast("Question set refreshed.");
         }
+        return true;
       } else {
         throw new Error("No questions returned");
       }
     } catch (genError) {
       const timedOut = genError?.name === "AbortError";
+      const rateLimited =
+        genError?.status === 429 || /rate limit|too many requests|429/i.test(String(genError?.message || ""));
       setError(
-        timedOut
+        rateLimited
+          ? "Rate limit hit. Please wait a few seconds and try again."
+          : timedOut
           ? "Next question timed out. Please retry."
           : "Could not generate questions. Check backend or API key."
       );
       setSubmitState("Next question failed");
     } finally {
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
       setLoading(false);
+    }
+    return false;
+  };
+
+  const startCallMode = async () => {
+    const randomInterviewer = interviewers[Math.floor(Math.random() * interviewers.length)];
+    setInterviewerName(randomInterviewer);
+    setQuestionTimeLeft(getRoundTimeLimit());
+    const ok = await generateQuestions({
+      mode: "initial",
+      silent: false,
+      autoStartVoice: true,
+      autoStartInterview: true,
+    });
+    if (!ok) return;
+    setIsCallPage(true);
+    showToast("Joined interview call.");
+  };
+
+  const endCallMode = () => {
+    setIsCallPage(false);
+    pauseVoiceLoop({ message: "Interview call ended." });
+    if (recording) {
+      stopRecording();
     }
   };
 
@@ -562,8 +877,14 @@ export default function App() {
         setScore(null);
         setSubmitState("Answered");
         showToast("Answer ready.");
+        const isComplete = markQuestionCompleted();
+        if (stopAfterSubmitRef.current) {
+          stopAfterSubmitRef.current = false;
+          pauseVoiceLoop({ message: "Interview stopped." });
+          return;
+        }
 
-        if (autoVoiceInterviewRef.current) {
+        if (autoVoiceInterviewRef.current && !isComplete) {
           const lang = assistantLangRef.current;
           const intro =
             lang === "en"
@@ -572,11 +893,21 @@ export default function App() {
           const decisionLine =
             lang === "en"
               ? "If you want to stop, say stop now. Otherwise I will continue with the next question."
-              : "Agar aapko stop karna hai to abhi stop boliye. Warna main next question continue karunga.";
+              : "Agar aapko stop karna hai to abhi stop boliye. Warna main next question continue karungi.";
           await startStopOnlyWindow(`${intro} ${answerText} ${decisionLine}`);
+        } else if (!isComplete) {
+          window.setTimeout(() => {
+            void generateQuestions({
+              mode: "next",
+              silent: true,
+              autoStartVoice: false,
+              autoStartInterview: false,
+            });
+          }, 600);
         }
       } catch {
         setSubmitState("Answer failed");
+        stopAfterSubmitRef.current = false;
       } finally {
         submitInFlightRef.current = false;
       }
@@ -614,10 +945,14 @@ export default function App() {
       setScore(nextScore);
       setSubmitState("Submitted");
       showToast("Feedback received.");
+      const isComplete = markQuestionCompleted();
+      if (stopAfterSubmitRef.current) {
+        stopAfterSubmitRef.current = false;
+        pauseVoiceLoop({ message: "Interview stopped." });
+        return;
+      }
 
-      if (autoVoiceInterviewRef.current) {
-        const isCorrect = nextScore !== null ? nextScore >= 70 : false;
-        const verdict = isCorrect ? "correct" : "incorrect";
+      if (autoVoiceInterviewRef.current && !isComplete) {
         const lang = assistantLangRef.current;
         const verdictLine =
           nextScore !== null
@@ -630,17 +965,70 @@ export default function App() {
         const decisionLine =
           lang === "en"
             ? "If you want to stop, say stop now. Otherwise I will continue with the next question."
-            : "Agar aapko stop karna hai to abhi stop boliye. Warna main next question continue karunga.";
+            : "Agar aapko stop karna hai to abhi stop boliye. Warna main next question continue karungi.";
         const spokenEval = `${verdictLine} ${nextFeedback} ${decisionLine}`;
         await startStopOnlyWindow(spokenEval);
+      } else if (!isComplete) {
+        window.setTimeout(() => {
+          void generateQuestions({
+            mode: "followup",
+            answerText: finalAnswer,
+            silent: true,
+            autoStartVoice: false,
+            autoStartInterview: false,
+          });
+        }, 600);
       }
     } catch (submitError) {
       setSubmitState("Submit failed");
       setError(String(submitError?.message || "Submit failed"));
       showToast("Submit failed. Please try again.");
+      stopAfterSubmitRef.current = false;
     } finally {
       submitInFlightRef.current = false;
     }
+  };
+
+  const handleNoRealtimeResponse = async () => {
+    if (noResponseInFlightRef.current) return;
+    if (!currentQuestion.trim()) return;
+    noResponseInFlightRef.current = true;
+    setSubmitState("No realtime response detected");
+    setScore(0);
+
+    try {
+      const response = await fetch("/api/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role,
+          track,
+          level,
+          question: currentQuestion,
+          language: assistantLangRef.current || "en",
+        }),
+      });
+      if (!response.ok) throw new Error("Could not prepare coaching feedback");
+      const data = await response.json();
+      const quickFeedback = String(data.answer || "").trim();
+      setFeedback(quickFeedback || "No response captured. Keep your next answer concise and structured.");
+    } catch {
+      setFeedback("No response captured. Try answering with a short structure: context, action, impact.");
+    }
+
+    const isComplete = markQuestionCompleted();
+    if (!isComplete) {
+      window.setTimeout(() => {
+        void generateQuestions({
+          mode: "next",
+          silent: true,
+          autoStartVoice: false,
+          autoStartInterview: false,
+        });
+      }, 700);
+    }
+    markAnswerActivity();
+    noResponseInFlightRef.current = false;
   };
 
   const parseNextDecision = (text) => {
@@ -664,9 +1052,8 @@ export default function App() {
 
     const hasYes = yesRegex.test(cleaned) || yesHindiTokens.some((token) => cleaned.includes(token));
     const hasStop = stopRegex.test(cleaned) || stopHindiTokens.some((token) => cleaned.includes(token));
-    if (hasYes && !hasStop) return "next";
-    if (hasStop && !hasYes) return "stop";
-    if (hasYes && hasStop) return "next";
+    if (hasStop) return "stop";
+    if (hasYes) return "next";
     return null;
   };
 
@@ -740,6 +1127,7 @@ export default function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               text: humanizeSpeechText(text, assistantLangRef.current),
+              language: assistantLangRef.current || "en",
             }),
           });
           if (!response.ok) {
@@ -801,6 +1189,16 @@ export default function App() {
   }, [onHold]);
 
   useEffect(() => {
+    completedCountRef.current = questionsCompleted;
+  }, [questionsCompleted]);
+
+  useEffect(() => {
+    if (questionsCompleted <= targetQuestions) return;
+    setQuestionsCompleted(targetQuestions);
+    completedCountRef.current = targetQuestions;
+  }, [targetQuestions, questionsCompleted]);
+
+  useEffect(() => {
     speechSupportedRef.current = speechSupported;
   }, [speechSupported]);
 
@@ -813,33 +1211,13 @@ export default function App() {
   }, [awaitingNextDecision]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const startPreview = async () => {
-      try {
-        const current = await ensureStream();
-        if (!cancelled && videoRef.current) {
-          videoRef.current.srcObject = current;
-        }
-      } catch {
-        if (!cancelled) {
-          showToast("Allow camera access to enable preview.");
-        }
-      }
-    };
-
-    startPreview();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (stream && videoRef.current) {
-      videoRef.current.srcObject = stream;
+    if (callVideoRef.current) {
+      callVideoRef.current.srcObject = stream || null;
     }
-  }, [stream]);
+    if (lobbyVideoRef.current) {
+      lobbyVideoRef.current.srcObject = stream || null;
+    }
+  }, [stream, isCallPage]);
 
   useEffect(() => {
     if (!stream) return;
@@ -960,7 +1338,53 @@ export default function App() {
       }
 
       if (finalText) {
+        const normalizedCommand = normalizeTranscript(finalText)
+          .toLowerCase()
+          .replace(/[^a-z0-9\u0900-\u097f\s]/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const isSubmitCommand = /\bsubmit\b/.test(normalizedCommand);
+        const isStopCommand =
+          /^(stop|stop now|end|end interview|quit|exit|ruk|ruko|band|band karo|bas|roko|stop karo)$/.test(
+            normalizedCommand
+          ) || /(?:^|\s)(stop interview|end interview)(?:\s|$)/.test(normalizedCommand);
+
+        if (isStopCommand) {
+          manualDictationActiveRef.current = false;
+          autoListenRef.current = false;
+          if (answerRef.current.trim()) {
+            pendingSubmitRef.current = true;
+            stopAfterSubmitRef.current = true;
+            setSpeechState("Submitting and stopping...");
+          } else {
+            stopAfterSubmitRef.current = false;
+            setSpeechState("Stopping interview...");
+            handleDecisionAction("stop");
+          }
+          try {
+            recognition.stop();
+          } catch {
+            // no-op
+          }
+          return;
+        }
+
+        if (isSubmitCommand) {
+          pendingSubmitRef.current = true;
+          manualDictationActiveRef.current = false;
+          autoListenRef.current = false;
+          setSpeechState("Submitting...");
+          recognition.stop();
+          return;
+        }
+      }
+
+      if (finalText) {
         speechBufferRef.current += finalText;
+        const detectedLang = detectLanguage(finalText);
+        if (detectedLang && detectedLang !== assistantLangRef.current) {
+          updateAssistantLanguage(detectedLang);
+        }
       }
       speechInterimRef.current = interimText;
 
@@ -971,13 +1395,8 @@ export default function App() {
         .trim();
       setAnswer(combined);
       answerRef.current = combined;
+      markAnswerActivity();
 
-      if (finalText && /\bsubmit\b/i.test(finalText)) {
-        pendingSubmitRef.current = true;
-        autoListenRef.current = false;
-        setSpeechState("Submitting...");
-        recognition.stop();
-      }
     };
 
     recognition.onend = () => {
@@ -997,11 +1416,22 @@ export default function App() {
 
       if (manualDictationStopRef.current) {
         manualDictationStopRef.current = false;
+        if (pendingSubmitRef.current) {
+          clearStopSubmitFallback();
+          pendingSubmitRef.current = false;
+          submitAnswer();
+        }
         return;
       }
       if (pendingSubmitRef.current) {
+        clearStopSubmitFallback();
         pendingSubmitRef.current = false;
         submitAnswer();
+        return;
+      }
+      if (manualDictationActiveRef.current) {
+        setSpeechState("Realtime listening...");
+        startDictationWithRetry({ attempts: 6, delayMs: 180 });
         return;
       }
       if (autoListenRef.current) {
@@ -1016,6 +1446,14 @@ export default function App() {
       listeningRef.current = false;
       clearHoldTimer();
       setSpeechState(`Speech error: ${event.error}`);
+      if (
+        manualDictationActiveRef.current &&
+        !manualDictationStopRef.current &&
+        event.error !== "not-allowed" &&
+        event.error !== "service-not-allowed"
+      ) {
+        startDictationWithRetry({ attempts: 6, delayMs: 250 });
+      }
     };
 
     recognitionRef.current = recognition;
@@ -1025,6 +1463,7 @@ export default function App() {
       recognition.onend = null;
       recognition.onerror = null;
       clearAutoSubmitTimer();
+      clearStopSubmitFallback();
       clearDecisionTimer();
       clearHoldTimer();
       try {
@@ -1045,22 +1484,114 @@ export default function App() {
 
   useEffect(() => {
     if (!currentQuestion) return;
+    setQuestionTimeLeft(getRoundTimeLimit());
     const nextQuestion = currentQuestion.trim();
     if (nextQuestion) {
       const existing = recentQuestionsRef.current.filter((item) => item !== nextQuestion);
       recentQuestionsRef.current = [...existing, nextQuestion].slice(-20);
     }
     if (!autoVoiceInterviewRef.current && !interviewStarted) return;
-    if (!didAutoplayRef.current) {
-      didAutoplayRef.current = true;
-      speakQuestion(currentQuestion, { listenAfter: autoVoiceInterviewRef.current });
-      return;
-    }
-    speakQuestion(currentQuestion, { listenAfter: autoVoiceInterviewRef.current });
+    let cancelled = false;
+    const run = async () => {
+      if (!didAutoplayRef.current) {
+        didAutoplayRef.current = true;
+      }
+      await speakQuestion(currentQuestion, { listenAfter: autoVoiceInterviewRef.current });
+      if (!cancelled && isCallPage && interviewStarted) {
+        armAnswerPauseTimer();
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
   }, [currentQuestion]);
 
   useEffect(() => {
+    if (!interviewStarted || !currentQuestion) return undefined;
+    if (loading || awaitingNextDecision) return undefined;
+    if (submitState === "Submitting..." || submitState === "Answering..." || submitState === "Round complete") {
+      return undefined;
+    }
+
+    const timerId = window.setInterval(() => {
+      setQuestionTimeLeft((prev) => Math.max(0, prev - 1));
+    }, 1000);
+
     return () => {
+      window.clearInterval(timerId);
+    };
+  }, [interviewStarted, currentQuestion, loading, awaitingNextDecision, submitState]);
+
+  useEffect(() => {
+    if (!isCallPage || !interviewStarted || !currentQuestion) return undefined;
+    if (!answerPauseArmed) return undefined;
+    if (loading || submitInFlightRef.current || noResponseInFlightRef.current) return undefined;
+    if (submitState === "Round complete") return undefined;
+
+    const timerId = window.setInterval(() => {
+      const secondsIdle = Math.floor((Date.now() - lastAnswerActivityRef.current) / 1000);
+      const left = Math.max(0, ANSWER_PAUSE_LIMIT_SECONDS - secondsIdle);
+      setAnswerPauseLeft(left);
+      if (left === 0) {
+        window.clearInterval(timerId);
+        if (listeningRef.current && recognitionRef.current) {
+          pendingSubmitRef.current = true;
+          autoListenRef.current = false;
+          setSpeechState("Submitting...");
+          try {
+            recognitionRef.current.stop();
+          } catch {
+            // no-op
+          }
+          return;
+        }
+        if (answerRef.current.trim()) {
+          void submitAnswer();
+        } else {
+          void handleNoRealtimeResponse();
+        }
+      }
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isCallPage, interviewStarted, currentQuestion, answerPauseArmed, loading, submitState]);
+
+  useEffect(() => {
+    if (!interviewStarted || !currentQuestion) return;
+    if (questionTimeLeft > 0) return;
+    if (submitInFlightRef.current) return;
+    if (submitState === "Submitting..." || submitState === "Answering..." || submitState === "Round complete") {
+      return;
+    }
+
+    if (answerRef.current.trim()) {
+      showToast("Time is up. Submitting your answer.");
+      void submitAnswer();
+      return;
+    }
+
+    setSubmitState("Time up - skipped");
+    setFeedback("No answer captured for this question.");
+    setScore(0);
+    const isComplete = markQuestionCompleted();
+    if (!isComplete) {
+      window.setTimeout(() => {
+        void generateQuestions({
+          mode: "next",
+          silent: true,
+          autoStartVoice: false,
+          autoStartInterview: false,
+        });
+      }, 600);
+    }
+  }, [questionTimeLeft, interviewStarted, currentQuestion, submitState]);
+
+  useEffect(() => {
+    return () => {
+      stopSarvamDictation();
       if (serverAudioRef.current) {
         serverAudioRef.current.pause();
         serverAudioRef.current = null;
@@ -1074,6 +1605,11 @@ export default function App() {
     return "35%";
   }, [recording, uploadState]);
 
+  const roundProgress = useMemo(() => {
+    const denominator = Math.max(1, Number(targetQuestions) || 1);
+    return Math.min(100, Math.round((questionsCompleted / denominator) * 100));
+  }, [questionsCompleted, targetQuestions]);
+
   const voiceMode = useMemo(() => {
     if (listening) return "user-talking";
     if (ttsState === "Speaking...") return "llm-talking";
@@ -1082,6 +1618,172 @@ export default function App() {
     }
     return "idle";
   }, [listening, ttsState, loading, submitState]);
+
+  const userVoiceMode = useMemo(() => {
+    if (listening || sarvamRecording) return "user-talking";
+    return "idle";
+  }, [listening, sarvamRecording]);
+  const hasActiveVideo = Boolean(camOn && stream && stream.getVideoTracks().some((trackItem) => trackItem.enabled));
+
+  if (isCallPage) {
+    return (
+      <div className="page">
+        <div className="grain" />
+        <header className="nav">
+          <div className="brand">
+            <span className="logo">IA</span>
+            <div>
+              <div className="name">Interview Atlas</div>
+              <div className="tag">Live interview call</div>
+            </div>
+          </div>
+          <div className="call-header-actions">
+            <button
+              className="btn ghost"
+              onClick={() => generateQuestions({ mode: "next", autoStartInterview: false })}
+            >
+              Next question
+            </button>
+            <button className="btn ghost" onClick={pauseVoiceLoop}>
+              Pause voice
+            </button>
+            <button className="btn primary" onClick={endCallMode}>
+              Leave call
+            </button>
+          </div>
+        </header>
+
+        <main className="call-main">
+          <section className="call-stage">
+            <article className="call-screen interviewer-screen">
+              <div className="screen-top">
+                <span className="pill">{interviewerName}</span>
+                <span className={`timer-chip ${questionTimeLeft <= 15 ? "danger" : ""}`}>
+                  {formatCountdown(questionTimeLeft)}
+                </span>
+              </div>
+              <div className="interviewer-avatar">{interviewerName.split(" ")[0]?.slice(0, 1) || "I"}</div>
+              <div className="meta">Interviewer | Adaptive</div>
+              <div className={`voice-wave ${voiceMode}`}>
+                <div className="wave-glow wave-glow-a" />
+                <div className="wave-glow wave-glow-b" />
+                <div className="wave-core" />
+              </div>
+            </article>
+
+            <article className="call-screen user-screen">
+              {hasActiveVideo ? (
+                <video ref={callVideoRef} autoPlay playsInline muted className={`video ${camOn ? "is-on" : ""}`} />
+              ) : (
+                <div className="interviewer-avatar">U</div>
+              )}
+              <div className="user-voice-overlay">
+                <div className={`voice-wave user-voice-wave ${userVoiceMode}`}>
+                  <div className="wave-glow wave-glow-a" />
+                  <div className="wave-glow wave-glow-b" />
+                  <div className="wave-core" />
+                </div>
+              </div>
+              <div className="camera-label">
+                <span className="live-dot" />
+                You | {role || "Candidate"}
+              </div>
+            </article>
+
+            <article className="call-screen question-screen">
+              <div className="screen-top">
+                <span className="pill">Question Panel</span>
+                <span className="meta">
+                  {questionsCompleted + 1} / {targetQuestions}
+                </span>
+              </div>
+              <div className="question-card">{currentQuestion || "Generating first question..."}</div>
+              <div className="meta">
+                Click "Next question" for a fresh prompt. If you pause too long, AI gives quick feedback and moves on.
+              </div>
+            </article>
+          </section>
+
+          <aside className="call-sidebar">
+            <div className="interview-grid">
+              <div className="interview-kv">
+                <span className="meta">Role</span>
+                <strong>{role}</strong>
+              </div>
+              <div className="interview-kv">
+                <span className="meta">Track</span>
+                <strong>{track}</strong>
+              </div>
+              <div className="interview-kv">
+                <span className="meta">Level</span>
+                <strong>{level}</strong>
+              </div>
+              <div className="interview-kv">
+                <span className="meta">Progress</span>
+                <strong>
+                  {questionsCompleted}/{targetQuestions}
+                </strong>
+              </div>
+            </div>
+            <div className="progress interview-progress">
+              <span style={{ width: `${roundProgress}%` }} />
+            </div>
+
+            <label className="field">
+              Your answer
+              <textarea
+                rows="7"
+                value={answer}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  setAnswer(nextValue);
+                  markAnswerActivity();
+                }}
+                placeholder="Speak or type your answer as if you're in a live interview..."
+              />
+            </label>
+            <div className="meta">
+              Realtime pause timer: {formatCountdown(answerPauseLeft)} (auto-feedback + next question on timeout)
+            </div>
+            <div className="speech-controls">
+              <button className={`btn ${micOn ? "primary" : "ghost"}`} onClick={() => toggleTrack("audio")}>
+                {micOn ? "Mic on" : "Mic off"}
+              </button>
+              <button className={`btn ${camOn ? "primary" : "ghost"}`} onClick={() => toggleTrack("video")}>
+                {camOn ? "Camera on" : "Camera off"}
+              </button>
+              <button
+                className={`btn ${listening ? "primary" : "ghost"}`}
+                type="button"
+                onClick={toggleDictation}
+                disabled={!speechSupported}
+              >
+                {listening ? "Stop dictation" : "Start dictation"}
+              </button>
+              <button
+                className={`btn ${sarvamRecording ? "primary" : "ghost"}`}
+                type="button"
+                onClick={toggleSarvamDictation}
+                disabled={sarvamBusy}
+              >
+                {sarvamRecording ? "Stop Sarvam STT" : sarvamBusy ? "Transcribing..." : "Record Sarvam STT"}
+              </button>
+              <button className="btn primary" onClick={submitAnswerWithSpeech}>
+                Submit answer
+              </button>
+            </div>
+            <div className="meta">{submitState}</div>
+            {score !== null ? (
+              <div className="score-card">
+                <strong>Score: {score}/100</strong>
+                <p>{feedback}</p>
+              </div>
+            ) : null}
+          </aside>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -1150,11 +1852,10 @@ export default function App() {
             </div>
             <div className="card-body">
               <h3>Session preview</h3>
-              <ol className="questions">
-                {questions.map((q, idx) => (
-                  <li key={`${q}-${idx}`}>{q}</li>
-                ))}
-              </ol>
+              <p className="meta">
+                Configure role, level, and track, then join the live interview call. Questions appear only inside
+                the call room.
+              </p>
             </div>
             <div className="card-footer">
               <div className="progress">
@@ -1242,6 +1943,7 @@ export default function App() {
                   <option value="">Select language</option>
                   <option value="en">English</option>
                   <option value="hi">Hindi</option>
+                  <option value="hinglish">Hinglish</option>
                 </select>
               </label>
             </div>
@@ -1255,79 +1957,41 @@ export default function App() {
               <button className="btn ghost" onClick={recording ? stopRecording : startRecording}>
                 {recording ? "Stop recording" : "Start recording"}
               </button>
+              <button className="btn primary" onClick={startCallMode} disabled={loading}>
+                {loading ? "Generating..." : "Generate question & Join call"}
+              </button>
             </div>
             <div className="meta">{uploadState}</div>
             <div className="answer-box">
-              <label className="field">
-                <div className="question-header">
-                  <span>Current question</span>
-                  <button className="btn ghost" type="button" onClick={generateQuestions} disabled={loading}>
-                    {loading ? "Generating..." : "Generate questions"}
-                  </button>
+              <div className="interview-brief">
+                <div className="interview-brief-top">
+                  <strong>Ready To Join</strong>
                 </div>
-                <div className="question-card">{currentQuestion}</div>
-              </label>
-              <div className="speech-controls">
-                <button
-                  className="btn ghost"
-                  type="button"
-                  onClick={() => {
-                    if (!autoVoiceInterviewRef.current) {
-                      autoVoiceInterviewRef.current = true;
-                      setAutoVoiceInterview(true);
-                    }
-                    speakQuestion(currentQuestion, { listenAfter: true });
-                  }}
-                  disabled={!ttsSupported}
-                >
-                  Speak question
-                </button>
-                <div className="meta">{ttsSupported ? ttsState || "TTS ready" : "TTS not supported"}</div>
-              </div>
-              <label className="field">
-                Your answer
-                <textarea
-                  rows="5"
-                  value={answer}
-                  onChange={(e) => {
-                    const nextValue = e.target.value;
-                    setAnswer(nextValue);
-                  }}
-                  placeholder="Write your response to the current question..."
-                />
-              </label>
-              <div className="speech-controls">
-                <button
-                  className={`btn ${listening ? "primary" : "ghost"}`}
-                  type="button"
-                  onClick={toggleDictation}
-                  disabled={!speechSupported}
-                >
-                  {listening ? "Stop dictation" : "Start dictation"}
-                </button>
+                <div className="interview-grid">
+                  <div className="interview-kv">
+                    <span className="meta">Role</span>
+                    <strong>{role || "Not set"}</strong>
+                  </div>
+                  <div className="interview-kv">
+                    <span className="meta">Track</span>
+                    <strong>{track || "Not set"}</strong>
+                  </div>
+                  <div className="interview-kv">
+                    <span className="meta">Level</span>
+                    <strong>{level || "Not set"}</strong>
+                  </div>
+                </div>
                 <div className="meta">
-                  {speechSupported ? speechState || "Speech ready" : "Speech not supported"}
+                  Click "Generate question & Join call" to start a live interview room with interviewer, user, and
+                  question panels.
                 </div>
               </div>
-              <div className="meta">
-                After feedback, say stop to end. Otherwise the next question will start automatically.
-              </div>
-              <button className="btn primary" onClick={submitAnswerWithSpeech}>
-                Submit answer
-              </button>
-              <div className="meta">{submitState}</div>
-              {score !== null ? (
-                <div className="score-card">
-                  <strong>Score: {score}/100</strong>
-                  <p>{feedback}</p>
-                </div>
-              ) : null}
             </div>
           </div>
           <div className="preview-grid">
             <div className="camera-preview">
               <video
-                ref={videoRef}
+                ref={lobbyVideoRef}
                 autoPlay
                 playsInline
                 muted
@@ -1335,7 +1999,14 @@ export default function App() {
               />
               <div className="camera-label">
                 <span className="live-dot" />
-                Live preview
+                Live panel camera
+              </div>
+              <div className="camera-status">
+                {loading
+                  ? "Interviewer is preparing next prompt..."
+                  : listening
+                  ? "Interviewer is listening"
+                  : "Interviewer is reviewing your answer"}
               </div>
             </div>
             <div className="voice-preview">

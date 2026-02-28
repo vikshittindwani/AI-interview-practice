@@ -21,8 +21,9 @@ const sessionMemoryPath = path.join(dataDir, "session-memory.json");
 const sessionStore = new Map();
 const SESSION_LIMIT = Number(process.env.SESSION_MEMORY_LIMIT || 100);
 const SESSION_QUESTION_LIMIT = Number(process.env.SESSION_QUESTION_LIMIT || 40);
-const SIMILARITY_THRESHOLD = Number(process.env.QUESTION_SIMILARITY_THRESHOLD || 0.72);
+const SIMILARITY_THRESHOLD = Number(process.env.QUESTION_SIMILARITY_THRESHOLD || 0.58);
 const GROQ_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS || 25000);
+const GROQ_RETRY_LIMIT = Number(process.env.GROQ_RETRY_LIMIT || 5);
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -37,6 +38,148 @@ function normalizeQuestionText(text) {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function extractQuestionCandidate(text) {
+  const raw = String(text || "").replace(/\r/g, "\n").trim();
+  if (!raw) return "";
+  const strippedLines = raw
+    .split("\n")
+    .map((line) => line.replace(/^\s*[-*>\d.()]+\s*/, "").trim())
+    .filter(Boolean);
+  const compact = strippedLines.join(" ").replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+
+  const feedbackHint = /\b(good|great|nice|score|feedback|overall|your answer|improve|better|correct)\b/i;
+  const questionLead = /\b(how|what|why|when|where|which|who|can|could|would|will|do|does|did|is|are|should)\b/i;
+
+  const questionParts = compact.match(/[^?]*\?/g) || [];
+  if (questionParts.length) {
+    const scored = questionParts
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => ({
+        part,
+        score: (questionLead.test(part) ? 2 : 0) + (feedbackHint.test(part) ? -1 : 0),
+      }))
+      .sort((a, b) => b.score - a.score);
+    const best = scored[0]?.part || questionParts[questionParts.length - 1].trim();
+    return best.replace(/^["'`]+|["'`]+$/g, "").trim();
+  }
+
+  const picked = strippedLines.find((line) => questionLead.test(line)) || strippedLines[strippedLines.length - 1] || compact;
+  return picked.replace(/^["'`]+|["'`]+$/g, "").trim();
+}
+
+function getLeadPhrase(text, size = 4) {
+  const leadStopWords = new Set([
+    "can",
+    "could",
+    "would",
+    "will",
+    "you",
+    "please",
+    "tell",
+    "me",
+    "about",
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "which",
+    "do",
+    "does",
+    "did",
+    "your",
+    "a",
+    "an",
+    "the",
+  ]);
+  const tokens = normalizeQuestionText(text)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => !leadStopWords.has(token));
+  return tokens.slice(0, size).join(" ");
+}
+
+function ensureInterviewState(sessionMemory, { role, track, level }) {
+  if (!sessionMemory.interview || typeof sessionMemory.interview !== "object") {
+    sessionMemory.interview = {};
+  }
+  sessionMemory.interview = {
+    role: String(role || sessionMemory.interview.role || "").trim(),
+    track: String(track || sessionMemory.interview.track || "").trim(),
+    level: String(level || sessionMemory.interview.level || "").trim(),
+    askedQuestions: Array.isArray(sessionMemory.interview.askedQuestions)
+      ? sessionMemory.interview.askedQuestions.slice(-SESSION_QUESTION_LIMIT)
+      : [],
+    lastQuestion: String(sessionMemory.interview.lastQuestion || "").trim(),
+    lastCandidateAnswer: String(sessionMemory.interview.lastCandidateAnswer || "").trim(),
+  };
+  sessionMemory.updatedAt = Date.now();
+  return sessionMemory.interview;
+}
+
+function recordAskedQuestion(sessionMemory, question) {
+  const interview = sessionMemory.interview;
+  if (!interview || !question) return;
+  const clean = String(question || "").trim();
+  if (!clean) return;
+  const existing = Array.isArray(interview.askedQuestions) ? interview.askedQuestions : [];
+  interview.askedQuestions = [...existing, clean].slice(-SESSION_QUESTION_LIMIT);
+  interview.lastQuestion = clean;
+  sessionMemory.updatedAt = Date.now();
+}
+
+function buildInterviewerSystemPrompt({ level, language = "en" }) {
+  const style = "Be natural, professional, and balanced.";
+  const langHint = buildLanguageGuidance(language);
+  const interviewTypeLine = "You are an interviewer in a live interview tailored to the selected role, track, and level.";
+  return `${interviewTypeLine} ${style} Keep realism high.
+${buildLevelGuidance(level)}
+Ask only one clear question at a time. Do not include feedback, evaluation, or commentary.
+Avoid repetitive openers and repeated themes. ${langHint}`;
+}
+
+function buildNextQuestionPrompt({
+  role,
+  track,
+  level,
+  language = "en",
+  avoidList = [],
+  nonce = Date.now(),
+}) {
+  return `Generate one new interview question.
+Role: ${role}
+Track: ${track}
+Level: ${level}
+Track guidance: ${buildTrackGuidance(track)}
+Level guidance: ${buildLevelGuidance(level)}
+Language rule: ${buildLanguageGuidance(language)}
+Choose the most appropriate category and topic naturally based on this interview context.
+Avoid repeating any of these prior questions:
+${avoidList.length ? avoidList.map((item, idx) => `${idx + 1}. ${item}`).join("\n") : "None"}
+Use a different opener style from prior questions. Keep it under 35 words.
+Nonce: ${nonce}
+Return one standalone question only. No preface, no transition line, no feedback text.`;
+}
+
+function buildFollowUpPrompt({ role, track, level, question, answer, language = "en", nonce = Date.now() }) {
+  const answerText = String(answer || "").trim();
+  return `Generate one natural follow-up interviewer question.
+Role: ${role}
+Track: ${track}
+Level: ${level}
+Track guidance: ${buildTrackGuidance(track)}
+Level guidance: ${buildLevelGuidance(level)}
+Previous question: ${question}
+Candidate answer: ${answerText}
+Ask a precise follow-up that probes depth, tradeoff, or validation based on the candidate answer.
+Do not repeat the previous question. Keep under 30 words.
+Language rule: ${buildLanguageGuidance(language)}
+Nonce: ${nonce}
+Return one standalone question only. No preface, no transition line, no feedback text.`;
 }
 
 function toTokenSet(text) {
@@ -91,11 +234,13 @@ function jaccardSimilarity(a, b) {
 function isTooSimilar(candidate, existingQuestions) {
   const candidateTokens = toTokenSet(candidate);
   const candidateNormalized = normalizeQuestionText(candidate);
+  const candidateLead = getLeadPhrase(candidate);
   if (!candidateNormalized) return true;
   for (const existing of existingQuestions) {
     const existingNormalized = normalizeQuestionText(existing);
     if (!existingNormalized) continue;
     if (candidateNormalized === existingNormalized) return true;
+    if (candidateLead && candidateLead === getLeadPhrase(existing)) return true;
     const similarity = jaccardSimilarity(candidateTokens, toTokenSet(existing));
     if (similarity >= SIMILARITY_THRESHOLD) return true;
   }
@@ -144,8 +289,21 @@ function loadSessionMemory() {
       const questions = Array.isArray(value.questions)
         ? value.questions.map((q) => String(q || "").trim()).filter(Boolean).slice(-SESSION_QUESTION_LIMIT)
         : [];
+      const interview = value.interview && typeof value.interview === "object" ? value.interview : null;
       sessionStore.set(sessionId, {
         questions,
+        interview: interview
+          ? {
+              role: String(interview.role || "").trim(),
+              track: String(interview.track || "").trim(),
+              level: String(interview.level || "").trim(),
+              askedQuestions: Array.isArray(interview.askedQuestions)
+                ? interview.askedQuestions.map((q) => String(q || "").trim()).filter(Boolean).slice(-SESSION_QUESTION_LIMIT)
+                : [],
+              lastQuestion: String(interview.lastQuestion || "").trim(),
+              lastCandidateAnswer: String(interview.lastCandidateAnswer || "").trim(),
+            }
+          : undefined,
         updatedAt: Number(value.updatedAt || Date.now()),
       });
     }
@@ -165,6 +323,7 @@ function schedulePersistSessionMemory() {
       for (const [sessionId, value] of sessionStore.entries()) {
         payload[sessionId] = {
           questions: value.questions || [],
+          interview: value.interview || {},
           updatedAt: value.updatedAt || Date.now(),
         };
       }
@@ -196,7 +355,9 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024 },
 });
 
-const murfTtsUrl = process.env.MURF_TTS_URL || "https://api.murf.ai/v1/speech/generate";
+const sarvamTtsUrl = process.env.SARVAM_TTS_URL || "https://api.sarvam.ai/text-to-speech/stream";
+const sarvamSttUrl =
+  process.env.SARVAM_STT_URL || "https://api.sarvam.ai/speech-to-text";
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = GROQ_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -208,130 +369,302 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = GROQ_TIMEOUT_MS) 
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(retryAfterHeader, fallbackMs = 1200) {
+  const value = String(retryAfterHeader || "").trim();
+  if (!value) return fallbackMs;
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.max(250, Math.round(asNumber * 1000));
+  }
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(250, dateMs - Date.now());
+  }
+  return fallbackMs;
+}
+
+async function requestUniqueQuestions({
+  apiKey,
+  model,
+  systemPrompt,
+  userPrompt,
+  count = 1,
+  avoidList = [],
+  temperature = 0.9,
+}) {
+  let accepted = [];
+  let generatedPool = [];
+  let attempts = 0;
+  let lastDetail = "";
+
+  while (accepted.length < count && attempts < GROQ_RETRY_LIMIT) {
+    attempts += 1;
+    const response = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content:
+              attempts === 1
+                ? userPrompt
+                : `${userPrompt}\nAttempt ${attempts}: use a different framing and avoid repeated wording.`,
+          },
+        ],
+        temperature,
+        max_tokens: 300,
+      }),
+    });
+
+    if (!response.ok) {
+      lastDetail = await response.text();
+      if (response.status === 429 && attempts < GROQ_RETRY_LIMIT) {
+        const retryAfterMs = parseRetryAfterMs(
+          response.headers.get("retry-after"),
+          700 * attempts + Math.floor(Math.random() * 300)
+        );
+        await sleep(retryAfterMs);
+        continue;
+      }
+      break;
+    }
+
+    const data = await response.json();
+    const text = String(data.choices?.[0]?.message?.content || "").trim();
+    const generated = (() => {
+      if (count === 1) {
+        const single = extractQuestionCandidate(text);
+        return single ? [single] : [];
+      }
+      return text
+        .split("\n")
+        .map((line) => extractQuestionCandidate(line))
+        .filter(Boolean);
+    })();
+    generatedPool = [...generatedPool, ...generated];
+
+    for (const question of generated) {
+      if (accepted.length >= count) break;
+      if (isTooSimilar(question, [...avoidList, ...accepted])) continue;
+      accepted.push(question);
+    }
+  }
+
+  if (accepted.length < count) {
+    const normalizedAccepted = new Set(accepted.map((q) => normalizeQuestionText(q)));
+    const normalizedAvoid = new Set(avoidList.map((q) => normalizeQuestionText(q)));
+    for (const question of generatedPool) {
+      if (accepted.length >= count) break;
+      const normalized = normalizeQuestionText(question);
+      if (!normalized || normalizedAccepted.has(normalized) || normalizedAvoid.has(normalized)) continue;
+      accepted.push(question);
+      normalizedAccepted.add(normalized);
+    }
+  }
+
+  return { questions: accepted.slice(0, count), lastDetail };
+}
+
+function isRateLimited(detail) {
+  return /\brate limit\b|\btoo many requests\b|\b429\b/i.test(String(detail || ""));
+}
+
 
 function buildLevelGuidance(level) {
   const normalized = String(level || "").trim().toLowerCase();
   if (normalized === "entry") {
-    return "Entry difficulty only: fundamentals, simple practical scenarios, clear definitions, no deep architecture or research-heavy topics.";
+    return "Entry only: fundamentals, basic scenarios, and clear definitions.";
   }
   if (normalized === "mid") {
-    return "Mid difficulty only: practical implementation tradeoffs and moderate complexity; avoid senior/staff scope.";
+    return "Mid only: practical implementation and tradeoffs.";
   }
   if (normalized === "senior") {
-    return "Senior difficulty: complex tradeoffs, scalability, system-level impact, and ambiguity handling.";
+    return "Senior only: architecture, leadership, and decision-making.";
   }
   if (normalized === "staff") {
-    return "Staff difficulty: org-level strategy, cross-team architecture, long-term technical direction, and leadership judgment.";
+    return "Staff only: org impact, strategy, and complex systems.";
   }
   return `Use the selected level (${level}) strictly; do not drift to senior/staff complexity unless selected.`;
 }
 
-function buildFallbackQuestions({ role, track, level, count = 1, language = "en", avoidList = [] }) {
-  const roleText = String(role || "this role").trim();
-  const trackText = String(track || "this track").trim();
-  const levelText = String(level || "selected").trim();
-  const lang = String(language || "en").toLowerCase();
-
-  const english = [
-    `Can you walk me through a recent ${roleText} project and your key technical decisions?`,
-    `For ${trackText}, what tradeoff do you evaluate first at ${levelText} level, and why?`,
-    `Describe a production issue you solved and how you verified the fix end-to-end.`,
-    `How do you break a complex problem into milestones before implementation starts?`,
-    `What metrics would you track to confirm your solution is actually working?`,
-  ];
-  const hindi = [
-    `Aap apne kisi recent ${roleText} project ke baare mein batayein, aur key technical decisions kya the?`,
-    `${trackText} mein ${levelText} level par aap sabse pehla tradeoff kaise evaluate karte hain, aur kyun?`,
-    `Kisi production issue ka example dijiye jo aapne solve kiya ho, aur fix ko end-to-end kaise verify kiya?`,
-    `Complex problem ko implementation se pehle milestones mein kaise todte hain?`,
-    `Aap kaunse metrics track karte hain taaki solution ke result confirm ho sakein?`,
-  ];
-
-  const candidates = lang === "hi" || lang === "hinglish" ? hindi : english;
-  const filtered = candidates.filter((q) => !isTooSimilar(q, avoidList));
-  const chosen = (filtered.length ? filtered : candidates).slice(0, Math.max(1, Number(count) || 1));
-  return chosen;
+function buildTrackGuidance(track) {
+  const normalized = String(track || "").trim().toLowerCase();
+  if (normalized.includes("system design")) {
+    return "Focus on architecture, scalability, tradeoffs, APIs, and infrastructure.";
+  }
+  if (normalized.includes("ml fundamental") || normalized.includes("machine learning")) {
+    return "Focus on ML concepts, algorithms, evaluation, data, and modeling.";
+  }
+  if (normalized.includes("behavioral") || normalized.includes("behavioural")) {
+    return "Focus on STAR method, leadership, teamwork, and conflict handling.";
+  }
+  if (normalized.includes("product sense") || normalized.includes("product")) {
+    return "Focus on product thinking, metrics, prioritization, and UX.";
+  }
+  return "Use the selected track strictly and keep topics within that domain.";
 }
 
-async function synthesizeMurfSimple(text) {
-  const apiKey = process.env.MURF_API_KEY;
+function buildLanguageGuidance(language) {
+  const normalized = String(language || "en").trim().toLowerCase();
+  if (normalized === "hi" || normalized === "hindi") {
+    return "Use fully Hindi.";
+  }
+  if (normalized === "hinglish") {
+    return "Use natural spoken Hinglish (Hindi + English mix).";
+  }
+  return "Use fully English.";
+}
+
+function buildFallbackQuestions({ role, track, level, count = 1, language = "en", avoidList = [] }) {
+  // Intentionally empty: question generation is LLM-only.
+  return [];
+}
+
+function buildLocalEvaluation({ answer = "", language = "en" }) {
+  const text = String(answer || "").trim();
+  const words = text ? text.split(/\s+/).length : 0;
+  const sentenceCount = text ? String(text).split(/[.!?]+/).filter((s) => s.trim().length > 0).length : 0;
+  const hasStructure =
+    /\b(first|second|finally|because|impact|result|tradeoff|therefore|approach|step)\b/i.test(text) ||
+    /\b(pehle|phir|akhir|isliye|impact|result|approach|step)\b/i.test(text);
+  const base = Math.min(60, words * 1.2) + Math.min(20, sentenceCount * 3) + (hasStructure ? 12 : 0);
+  const score = Math.max(25, Math.min(85, Math.round(base)));
+  const isHindi = String(language).toLowerCase() === "hi";
+  const feedback = isHindi
+    ? `Groq feedback unavailable tha, isliye local evaluation diya gaya. Aapka answer ${score}/100 ke aas-paas hai. Agle answer mein concise structure rakhiye: context, actions, impact, aur ek clear tradeoff.`
+    : `Groq feedback was unavailable, so this is a local evaluation. Your answer is around ${score}/100. For the next answer, use a tight structure: context, actions, impact, and one clear tradeoff.`;
+
+  return { score, feedback, fallback: true };
+}
+
+function buildLocalSampleAnswer({ question = "", language = "en" }) {
+  const q = String(question || "this question").trim();
+  const isHindi = String(language).toLowerCase() === "hi";
+  if (isHindi) {
+    return `Is question ka structured answer dene ke liye pehle context clear karein, phir apna approach batayein, phir measurable impact share karein, aur end mein tradeoff mention karein. Agar real example ho to 1 short STAR style example add karein. Question: ${q}`;
+  }
+  return `To answer this well, start with context, then explain your approach, then quantify impact, and close with one tradeoff you considered. If possible, include one short STAR-style example. Question: ${q}`;
+}
+
+function mapAssistantLanguageToSarvamCode(language) {
+  const lang = String(language || "").toLowerCase();
+  if (lang === "hi" || lang === "hinglish") return "hi-IN";
+  return "en-IN";
+}
+
+function getSarvamSttConfig(language = "en") {
+  const normalizedLanguage = String(language || "").toLowerCase();
+  const model = String(process.env.SARVAM_STT_MODEL || "saaras:v3").trim();
+  const mode = String(
+    process.env.SARVAM_STT_MODE || (normalizedLanguage === "hinglish" ? "codemix" : "transcribe")
+  )
+    .trim()
+    .toLowerCase();
+  const languageCode = String(
+    process.env.SARVAM_STT_LANGUAGE_CODE ||
+      (mode === "codemix" ? "unknown" : mapAssistantLanguageToSarvamCode(normalizedLanguage))
+  ).trim();
+  return { model, mode, languageCode };
+}
+
+async function synthesizeSarvamSimple(text, language = "en") {
+  const apiKey = process.env.SARVAM_API_KEY;
   if (!apiKey) {
-    throw new Error("Missing MURF_API_KEY");
+    throw new Error("Missing SARVAM_API_KEY");
   }
 
-  const basePayload = {
-    text,
-    voiceId: process.env.MURF_VOICE_ID || "en-US-natalie",
-    style: process.env.MURF_STYLE || "Conversational",
-    modelVersion: (process.env.MURF_MODEL_VERSION || "FALCON").toUpperCase(),
-    multiNativeLocale: process.env.MURF_MULTI_NATIVE_LOCALE || "hi-IN",
-    format: (process.env.MURF_FORMAT || "MP3").toUpperCase(),
-    sampleRate: Number(process.env.MURF_SAMPLE_RATE || 24000),
-    channelType: (process.env.MURF_CHANNEL_TYPE || "MONO").toUpperCase(),
-    encodeAsBase64: true,
+  const outputCodec = (process.env.SARVAM_TTS_OUTPUT_AUDIO_CODEC || "mp3").toLowerCase();
+  const payload = {
+    text: String(text || "").trim(),
+    target_language_code:
+      process.env.SARVAM_TTS_TARGET_LANGUAGE_CODE || mapAssistantLanguageToSarvamCode(language),
+    speaker: process.env.SARVAM_TTS_SPEAKER || "shreya",
+    model: process.env.SARVAM_TTS_MODEL || "bulbul:v3",
+    pace: Number(process.env.SARVAM_TTS_PACE || 1.1),
+    speech_sample_rate: Number(process.env.SARVAM_TTS_SPEECH_SAMPLE_RATE || 22050),
+    output_audio_codec: outputCodec,
+    enable_preprocessing: String(process.env.SARVAM_TTS_ENABLE_PREPROCESSING || "true") !== "false",
   };
-  const murfHeaders = {
-    "Content-Type": "application/json",
-    "api-key": apiKey,
-  };
-  const voiceCandidates = [
-    basePayload.voiceId,
-    process.env.MURF_FALLBACK_VOICE_ID || "en-US-natalie",
-    "en-US-natalie",
-    "en-US-alicia",
-  ].filter(Boolean);
-  const modelCandidates =
-    basePayload.modelVersion === "FALCON"
-      ? ["FALCON", "GEN2"]
-      : [basePayload.modelVersion, "GEN2"];
-
-  let response = null;
-  let lastDetail = "";
-  for (const voiceId of [...new Set(voiceCandidates)]) {
-    for (const modelVersion of [...new Set(modelCandidates)]) {
-      const payload = { ...basePayload, voiceId, modelVersion };
-      response = await fetch(murfTtsUrl, {
-        method: "POST",
-        headers: murfHeaders,
-        body: JSON.stringify(payload),
-      });
-      if (response.ok) {
-        break;
-      }
-      lastDetail = await response.text();
-      const invalidVoice = /Invalid voice_id/i.test(lastDetail);
-      const invalidModel = /ModelVersion|GEN2|Invalid value/i.test(lastDetail);
-      if (!invalidVoice && !invalidModel) {
-        const error = new Error("Murf TTS API error");
-        error.detail = lastDetail;
-        throw error;
-      }
-    }
-    if (response?.ok) break;
+  const response = await fetch(sarvamTtsUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-subscription-key": apiKey,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    const error = new Error("Sarvam TTS API error");
+    error.detail = detail || "Unknown Sarvam TTS error";
+    throw error;
   }
-  if (!response?.ok) {
-    const error = new Error("Murf TTS API error");
-    error.detail = lastDetail || "Unknown Murf error";
+
+  const audioBuffer = Buffer.from(await response.arrayBuffer());
+  const audioBase64 = audioBuffer.toString("base64");
+  if (!audioBase64) {
+    const error = new Error("No audio returned");
+    error.detail = "Streamed audio buffer was empty";
+    throw error;
+  }
+
+  return { audioBase64, format: outputCodec };
+}
+
+async function transcribeSarvamAudio(file, language = "en") {
+  const apiKey = process.env.SARVAM_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing SARVAM_API_KEY");
+  }
+  if (!file?.path) {
+    throw new Error("No audio file provided");
+  }
+
+  const audioBuffer = fs.readFileSync(file.path);
+  const blob = new Blob([audioBuffer], { type: file.mimetype || "audio/webm" });
+  const form = new FormData();
+  const sttConfig = getSarvamSttConfig(language);
+  form.append("file", blob, file.originalname || path.basename(file.path));
+  form.append("model", sttConfig.model);
+  form.append("mode", sttConfig.mode);
+  form.append("language_code", sttConfig.languageCode);
+
+  const response = await fetch(sarvamSttUrl, {
+    method: "POST",
+    headers: { "api-subscription-key": apiKey },
+    body: form,
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    const error = new Error("Sarvam STT API error");
+    error.detail = detail || "Unknown Sarvam STT error";
     throw error;
   }
 
   const data = await response.json();
-  let audioBase64 = data?.encodedAudio || null;
-  if (!audioBase64 && data?.audioFile) {
-    const audioResponse = await fetch(data.audioFile);
-    if (audioResponse.ok) {
-      const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
-      audioBase64 = audioBuffer.toString("base64");
-    }
-  }
+  const transcript =
+    data?.transcript ||
+    data?.transcript_text ||
+    data?.text ||
+    data?.output_text ||
+    data?.data?.transcript ||
+    data?.results?.[0]?.transcript ||
+    "";
 
-  if (!audioBase64) {
-    const error = new Error("No audio returned");
-    error.detail = JSON.stringify(data);
-    throw error;
-  }
-
-  return { audioBase64, format: "mp3" };
+  return {
+    transcript: String(transcript || "").trim(),
+    raw: data,
+  };
 }
 
 
@@ -347,17 +680,13 @@ app.post("/api/generate", async (req, res) => {
     role = "",
     track = "",
     level = "",
-    count = 5,
+    count = 1,
     nonce = Date.now(),
     language = "en",
     recentQuestions = [],
     sessionId = "",
   } = req.body || {};
-  const apiKey = process.env.GROQ_API_KEY;
-
-  if (!apiKey) {
-    return res.status(400).json({ error: "Missing GROQ_API_KEY" });
-  }
+  const apiKey = String(process.env.GROQ_API_KEY || "").trim();
   if (!String(role).trim() || !String(track).trim() || !String(level).trim()) {
     return res.status(400).json({ error: "role, track, and level are required" });
   }
@@ -370,163 +699,278 @@ app.post("/api/generate", async (req, res) => {
         .slice(-20)
     : [];
   const sessionMemory = getSessionMemory(sessionId);
+  const interviewState = ensureInterviewState(sessionMemory, { role, track, level });
   const memoryList = Array.isArray(sessionMemory.questions) ? sessionMemory.questions.slice(-30) : [];
-  const avoidList = [...new Set([...memoryList, ...recentList])].slice(-40);
-  const languageHint =
-    String(language).toLowerCase() === "hinglish"
-      ? "Use casual Hinglish in Roman letters."
-      : String(language).toLowerCase() === "hi"
-      ? "Use natural Hindi in Devanagari script."
-      : "Use natural English.";
-  const levelHint = buildLevelGuidance(level);
+  const askedList = Array.isArray(interviewState.askedQuestions) ? interviewState.askedQuestions.slice(-20) : [];
+  const avoidList = [...new Set([...memoryList, ...askedList, ...recentList])].slice(-50);
 
-  const prompt = `Create ${Math.max(3, count * 4)} interview questions for a ${level} ${role} interview focused on ${track}.
-Guidelines:
-- Use role, track, and level to decide what to ask.
-- ${levelHint}
-- Use diverse sub-topics. Avoid reusing the same 7-8 templates.
-- Avoid repeating themes or wording from previous questions.
-${languageHint}
-Questions to avoid repeating:
-${avoidList.length ? avoidList.map((item, i) => `${i + 1}. ${item}`).join("\n") : "None"}
-Nonce: ${nonce}.
-Return each question on a new line only.`;
+  if (!apiKey) {
+    return res.status(503).json({
+      error: "Missing GROQ_API_KEY",
+      detail: "Question generation is LLM-only; configure GROQ_API_KEY to generate questions.",
+    });
+  }
+
+  const systemPrompt = buildInterviewerSystemPrompt({ level, language });
+  const prompt = buildNextQuestionPrompt({
+    role,
+    track,
+    level,
+    language,
+    avoidList,
+    nonce,
+  });
 
   try {
-    let accepted = [];
-    let generatedPool = [];
-    let attempts = 0;
-    let lastDetail = "";
-
-    while (accepted.length < count && attempts < 3) {
-      attempts += 1;
-      const response = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a friendly interview coach with a short, conversational tone. Ask one clear question at a time. Keep it crisp and natural.",
-            },
-            {
-              role: "user",
-              content:
-                attempts === 1
-                  ? prompt
-                  : `${prompt}\nAttempt ${attempts}: be more original and avoid repeating wording from earlier attempts.`,
-            },
-          ],
-          temperature: 0.95,
-          max_tokens: 700,
-        }),
-      });
-
-      if (!response.ok) {
-        lastDetail = await response.text();
-        break;
-      }
-
-      const data = await response.json();
-      const text = data.choices?.[0]?.message?.content || "";
-      const generated = text
-        .split("\n")
-        .map((line) => line.replace(/^\s*[-*\d.]+\s*/, "").trim())
-        .filter(Boolean);
-      generatedPool = [...generatedPool, ...generated];
-
-      for (const question of generated) {
-        if (accepted.length >= count) break;
-        if (isTooSimilar(question, [...avoidList, ...accepted])) continue;
-        accepted.push(question);
-      }
-    }
-
-    if (accepted.length < count) {
-      const normalizedAccepted = new Set(accepted.map((q) => normalizeQuestionText(q)));
-      const normalizedAvoid = new Set(avoidList.map((q) => normalizeQuestionText(q)));
-      for (const question of generatedPool) {
-        if (accepted.length >= count) break;
-        const normalized = normalizeQuestionText(question);
-        if (!normalized || normalizedAccepted.has(normalized) || normalizedAvoid.has(normalized)) continue;
-        accepted.push(question);
-        normalizedAccepted.add(normalized);
-      }
-    }
-
-    const fallback = avoidList.filter(Boolean).length
-      ? []
-      : [`Can you walk me through a recent project and your key technical decisions?`];
-    const questions = [...accepted, ...fallback].slice(0, count);
+    const { questions, lastDetail } = await requestUniqueQuestions({
+      apiKey,
+      model,
+      systemPrompt,
+      userPrompt: prompt,
+      count: Math.max(1, Number(count) || 1),
+      avoidList,
+      temperature: 0.92,
+    });
 
     if (!questions.length) {
-      const fallbackQuestions = buildFallbackQuestions({
-        role,
-        track,
-        level,
-        count,
-        language,
-        avoidList,
-      });
-      updateSessionMemory(sessionId, fallbackQuestions);
-      schedulePersistSessionMemory();
-      return res.json({
-        questions: fallbackQuestions,
-        fallback: true,
-        detail: lastDetail || "No unique questions returned from Groq.",
+      const rateLimited = isRateLimited(lastDetail);
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? "Groq rate limit exceeded" : "No unique questions returned from Groq",
+        detail: lastDetail || "Groq returned empty/duplicate-only output for this request.",
       });
     }
 
+    questions.forEach((q) => recordAskedQuestion(sessionMemory, q));
     updateSessionMemory(sessionId, questions);
     schedulePersistSessionMemory();
     return res.json({ questions });
   } catch (error) {
-    const fallbackQuestions = buildFallbackQuestions({
-      role,
-      track,
-      level,
-      count,
-      language,
-      avoidList,
-    });
-    updateSessionMemory(sessionId, fallbackQuestions);
-    schedulePersistSessionMemory();
-
     if (error?.name === "AbortError") {
-      return res.json({
-        questions: fallbackQuestions,
-        fallback: true,
-        detail: "Groq request timed out",
+      return res.status(504).json({
+        error: "Groq request timed out",
+        detail: "LLM generation timed out; please retry.",
       });
     }
 
+    return res.status(502).json({
+      error: "Failed to reach Groq API",
+      detail: String(error?.message || error),
+    });
+  }
+});
+
+app.post("/api/question/next", async (req, res) => {
+  const {
+    role = "",
+    track = "",
+    level = "",
+    nonce = Date.now(),
+    language = "en",
+    recentQuestions = [],
+    sessionId = "",
+  } = req.body || {};
+  const apiKey = String(process.env.GROQ_API_KEY || "").trim();
+  if (!String(role).trim() || !String(track).trim() || !String(level).trim()) {
+    return res.status(400).json({ error: "role, track, and level are required" });
+  }
+  if (!apiKey) {
+    return res.status(503).json({
+      error: "Missing GROQ_API_KEY",
+      detail: "Question generation is LLM-only; configure GROQ_API_KEY to generate questions.",
+    });
+  }
+
+  const sessionMemory = getSessionMemory(sessionId);
+  const interviewState = ensureInterviewState(sessionMemory, { role, track, level });
+  const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+  const recentList = Array.isArray(recentQuestions)
+    ? recentQuestions.map((item) => String(item || "").trim()).filter(Boolean).slice(-20)
+    : [];
+  const avoidList = [
+    ...new Set([
+      ...(sessionMemory.questions || []).slice(-30),
+      ...(interviewState.askedQuestions || []).slice(-25),
+      ...recentList,
+    ]),
+  ].slice(-60);
+  try {
+    const { questions, lastDetail } = await requestUniqueQuestions({
+      apiKey,
+      model,
+      systemPrompt: buildInterviewerSystemPrompt({ level, language }),
+      userPrompt: buildNextQuestionPrompt({
+        role,
+        track,
+        level,
+        language,
+        avoidList,
+        nonce,
+      }),
+      count: 1,
+      avoidList,
+      temperature: 0.9,
+    });
+
+    if (!questions.length) {
+      const rateLimited = isRateLimited(lastDetail);
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? "Groq rate limit exceeded" : "No unique questions returned from Groq",
+        detail: lastDetail || "Groq returned empty/duplicate-only output for this request.",
+      });
+    }
+    const question = questions[0];
+    recordAskedQuestion(sessionMemory, question);
+    updateSessionMemory(sessionId, [question]);
+    schedulePersistSessionMemory();
     return res.json({
-      questions: fallbackQuestions,
-      fallback: true,
-      detail: "Failed to reach Groq API",
+      question,
+      type: "next",
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return res.status(504).json({
+        error: "Groq request timed out",
+        detail: "LLM generation timed out; please retry.",
+      });
+    }
+    return res.status(502).json({
+      error: "Failed to reach Groq API",
+      detail: String(error?.message || error),
+    });
+  }
+});
+
+app.post("/api/question/followup", async (req, res) => {
+  const {
+    role = "",
+    track = "",
+    level = "",
+    question = "",
+    answer = "",
+    nonce = Date.now(),
+    language = "en",
+    sessionId = "",
+  } = req.body || {};
+  const apiKey = String(process.env.GROQ_API_KEY || "").trim();
+  if (!String(role).trim() || !String(track).trim() || !String(level).trim()) {
+    return res.status(400).json({ error: "role, track, and level are required" });
+  }
+  if (!String(answer).trim()) {
+    return res.status(400).json({ error: "answer is required" });
+  }
+  if (!apiKey) {
+    return res.status(503).json({
+      error: "Missing GROQ_API_KEY",
+      detail: "Question generation is LLM-only; configure GROQ_API_KEY to generate questions.",
+    });
+  }
+
+  const sessionMemory = getSessionMemory(sessionId);
+  const interviewState = ensureInterviewState(sessionMemory, { role, track, level });
+  const sourceQuestion = String(question || interviewState.lastQuestion || "").trim();
+  if (!sourceQuestion) {
+    return res.status(400).json({ error: "question is required for follow-up" });
+  }
+
+  const avoidList = [
+    ...new Set([...(sessionMemory.questions || []).slice(-30), ...(interviewState.askedQuestions || []).slice(-25)]),
+  ].slice(-60);
+  const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
+  try {
+    const { questions, lastDetail } = await requestUniqueQuestions({
+      apiKey,
+      model,
+      systemPrompt: buildInterviewerSystemPrompt({ level, language }),
+      userPrompt: buildFollowUpPrompt({
+        role,
+        track,
+        level,
+        question: sourceQuestion,
+        answer,
+        language,
+        nonce,
+      }),
+      count: 1,
+      avoidList: [...avoidList, sourceQuestion],
+      temperature: 0.75,
+    });
+
+    if (!questions.length) {
+      const rateLimited = isRateLimited(lastDetail);
+      return res.status(rateLimited ? 429 : 502).json({
+        error: rateLimited ? "Groq rate limit exceeded" : "No follow-up question returned from Groq",
+        detail: lastDetail || "Groq returned empty/duplicate-only output for follow-up request.",
+      });
+    }
+    const followupQuestion = questions[0];
+    interviewState.lastCandidateAnswer = String(answer).trim();
+    recordAskedQuestion(sessionMemory, followupQuestion);
+    updateSessionMemory(sessionId, [followupQuestion]);
+    schedulePersistSessionMemory();
+    return res.json({
+      question: followupQuestion,
+      type: "followup",
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return res.status(504).json({
+        error: "Groq request timed out",
+        detail: "LLM generation timed out; please retry.",
+      });
+    }
+    return res.status(502).json({
+      error: "Failed to reach Groq API",
+      detail: String(error?.message || error),
     });
   }
 });
 
 app.post("/api/voice", async (req, res) => {
-  const { text = "" } = req.body || {};
+  const { text = "", language = "en" } = req.body || {};
   if (!String(text).trim()) {
     return res.status(400).json({ error: "Text is required" });
   }
 
   try {
-    const audio = await synthesizeMurfSimple(String(text).trim());
+    const audio = await synthesizeSarvamSimple(String(text).trim(), language);
     return res.json(audio);
   } catch (error) {
     return res.status(500).json({
       error: "Failed to synthesize voice",
       detail: error?.detail || String(error?.message || error),
     });
+  }
+});
+
+app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
+  const language = String(req.body?.language || "en").trim();
+  if (!req.file) {
+    return res.status(400).json({ error: "Audio file is required" });
+  }
+
+  try {
+    const result = await transcribeSarvamAudio(req.file, language);
+    if (!result.transcript) {
+      return res.status(500).json({
+        error: "No transcript returned",
+        detail: JSON.stringify(result.raw || {}),
+      });
+    }
+    return res.json({ transcript: result.transcript });
+  } catch (error) {
+    return res.status(500).json({
+      error: "Failed to transcribe audio",
+      detail: error?.detail || String(error?.message || error),
+    });
+  } finally {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch {
+        // no-op
+      }
+    }
   }
 });
 
@@ -548,9 +992,13 @@ app.post("/api/evaluate", async (req, res) => {
     return res.status(400).json({ error: "role, track, and level are required" });
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = String(process.env.GROQ_API_KEY || "").trim();
   if (!apiKey) {
-    return res.status(400).json({ error: "Missing GROQ_API_KEY" });
+    const local = buildLocalEvaluation({ answer, language });
+    return res.json({
+      ...local,
+      detail: "Missing GROQ_API_KEY. Local fallback evaluation used.",
+    });
   }
 
   const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
@@ -594,6 +1042,13 @@ Return JSON with keys: score (number) and feedback (string).`;
 
     if (!response.ok) {
       const detail = await response.text();
+      if (/invalid_api_key/i.test(detail)) {
+        const local = buildLocalEvaluation({ answer, language });
+        return res.json({
+          ...local,
+          detail: "Groq invalid API key. Local fallback evaluation used.",
+        });
+      }
       return res.status(500).json({ error: "Groq API error", detail });
     }
 
@@ -618,7 +1073,11 @@ Return JSON with keys: score (number) and feedback (string).`;
       feedback: String(parsed.feedback || "").trim(),
     });
   } catch (error) {
-    return res.status(500).json({ error: "Failed to reach Groq API" });
+    const local = buildLocalEvaluation({ answer, language });
+    return res.json({
+      ...local,
+      detail: "Failed to reach Groq API. Local fallback evaluation used.",
+    });
   }
 });
 
@@ -638,9 +1097,13 @@ app.post("/api/answer", async (req, res) => {
     return res.status(400).json({ error: "role, track, and level are required" });
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = String(process.env.GROQ_API_KEY || "").trim();
   if (!apiKey) {
-    return res.status(400).json({ error: "Missing GROQ_API_KEY" });
+    return res.json({
+      answer: buildLocalSampleAnswer({ question, language }),
+      fallback: true,
+      detail: "Missing GROQ_API_KEY. Local fallback answer used.",
+    });
   }
 
   const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
@@ -684,6 +1147,13 @@ Return plain text only.`;
 
     if (!response.ok) {
       const detail = await response.text();
+      if (/invalid_api_key/i.test(detail)) {
+        return res.json({
+          answer: buildLocalSampleAnswer({ question, language }),
+          fallback: true,
+          detail: "Groq invalid API key. Local fallback answer used.",
+        });
+      }
       return res.status(500).json({ error: "Groq API error", detail });
     }
 
@@ -691,7 +1161,11 @@ Return plain text only.`;
     const text = data.choices?.[0]?.message?.content || "";
     return res.json({ answer: String(text || "").trim() });
   } catch (error) {
-    return res.status(500).json({ error: "Failed to reach Groq API" });
+    return res.json({
+      answer: buildLocalSampleAnswer({ question, language }),
+      fallback: true,
+      detail: "Failed to reach Groq API. Local fallback answer used.",
+    });
   }
 });
 
