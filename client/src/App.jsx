@@ -1,9 +1,11 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const tracks = ["System Design", "ML Fundamentals", "Behavioral", "Product Sense"];
 const levels = ["Entry", "Mid", "Senior", "Staff"];
 const interviewers = ["Priya Shah", "Neha Verma", "Ananya Iyer", "Kavya Menon"];
 const ANSWER_PAUSE_LIMIT_SECONDS = 5;
+const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+const apiPath = (endpoint) => `${API_BASE_URL}${endpoint}`;
 
 export default function App() {
   const [questions, setQuestions] = useState([]);
@@ -448,7 +450,7 @@ export default function App() {
 
       try {
         setUploadState("Uploading...");
-        const response = await fetch("/api/upload", {
+        const response = await fetch(apiPath("/api/upload"), {
           method: "POST",
           body: formData,
         });
@@ -520,7 +522,7 @@ export default function App() {
         setSarvamBusy(true);
         setSpeechState("Transcribing with Sarvam...");
         try {
-          const response = await fetch("/api/transcribe", {
+          const response = await fetch(apiPath("/api/transcribe"), {
             method: "POST",
             body: formData,
           });
@@ -711,7 +713,7 @@ export default function App() {
       .filter(Boolean);
     try {
       const endpoint =
-        mode === "followup" ? "/api/question/followup" : mode === "initial" ? "/api/generate" : "/api/question/next";
+        mode === "followup" ? apiPath("/api/question/followup") : mode === "initial" ? apiPath("/api/generate") : apiPath("/api/question/next");
       const payload = {
         role,
         track,
@@ -859,7 +861,7 @@ export default function App() {
       clearAutoSubmitTimer();
       setSubmitState("Answering...");
       try {
-        const response = await fetch("/api/answer", {
+        const response = await fetch(apiPath("/api/answer"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -888,7 +890,7 @@ export default function App() {
           const lang = assistantLangRef.current;
           const intro =
             lang === "en"
-              ? "No worries. Here’s a solid answer:"
+              ? "No worries. Here�s a solid answer:"
               : "Koi baat nahi. Yeh ek solid answer hai:";
           const decisionLine =
             lang === "en"
@@ -919,7 +921,7 @@ export default function App() {
     try {
       let response = null;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        response = await fetch("/api/evaluate", {
+        response = await fetch(apiPath("/api/evaluate"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -997,7 +999,7 @@ export default function App() {
     setScore(0);
 
     try {
-      const response = await fetch("/api/answer", {
+      const response = await fetch(apiPath("/api/answer"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1047,8 +1049,8 @@ export default function App() {
       /\b(yes|yeah|yep|ok|okay|sure|continue|next|proceed|haan|han|ha|haanji|agla|aage|chalo|continue karo|next question|yes continue)\b/;
     // Do not use bare "no" as stop signal; it causes false positives from phrases like "no worries".
     const stopRegex = /\b(stop|nope|nah|end|quit|exit|ruk|ruko|band|band karo|bas|nahi|mat|roko|stop karo)\b/;
-    const yesHindiTokens = ["हाँ", "हां", "आगे", "अगला", "नेक्स्ट", "यस"];
-    const stopHindiTokens = ["रुको", "रोक", "बंद", "बस", "नहीं", "स्टॉप"];
+    const yesHindiTokens = ["???", "???", "???", "????", "???????", "??"];
+    const stopHindiTokens = ["????", "???", "???", "??", "????", "?????"];
 
     const hasYes = yesRegex.test(cleaned) || yesHindiTokens.some((token) => cleaned.includes(token));
     const hasStop = stopRegex.test(cleaned) || stopHindiTokens.some((token) => cleaned.includes(token));
@@ -1122,7 +1124,7 @@ export default function App() {
       (async () => {
         setTtsState("Speaking...");
         try {
-          const response = await fetch("/api/voice", {
+          const response = await fetch(apiPath("/api/voice"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1159,9 +1161,9 @@ export default function App() {
   const buildSpokenQuestion = (text) => {
     const lang = assistantLangRef.current;
     if (lang === "hi") {
-      return `ठीक है, सवाल सुनिए: ${text}`;
+      return `??? ??, ???? ?????: ${text}`;
     }
-    return `Alright, here’s the question: ${text}`;
+    return `Alright, here�s the question: ${text}`;
   };
 
   const speakQuestion = (text, { listenAfter } = {}) =>
@@ -2072,7 +2074,7 @@ export default function App() {
             <div className="step">
               <div className="step-num">02</div>
               <h3>Live interview</h3>
-              <p>Timed prompts, follow-ups, and curveballs — just like a panel.</p>
+              <p>Timed prompts, follow-ups, and curveballs � just like a panel.</p>
             </div>
             <div className="step">
               <div className="step-num">03</div>
@@ -2154,13 +2156,16 @@ export default function App() {
           <strong>Interview Atlas</strong>
           <div className="meta">Practice interviews with clarity.</div>
         </div>
-        <div className="meta">© 2026 Interview Atlas</div>
+        <div className="meta">� 2026 Interview Atlas</div>
       </footer>
 
       {toast ? <div className="toast show">{toast}</div> : null}
     </div>
   );
 }
+
+
+
 
 
 
