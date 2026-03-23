@@ -1,13 +1,6 @@
 {
   "sess-1771304232807-rd0lc55u": {
     "questions": [
-      "जब आपके डेटा में कई कॉलम में missing values हों, तो आप प्राथमिकता के आधार पर कौन‑से इम्प्यूटेशन तरीकों को चुनेंगे और क्यों?",
-      "यदि आप एक रैग्रेशन मॉडल बनाते हैं और उसका R² स्कोर 0.2 है, तो मॉडल को बेहतर बनाने के लिए आप कौन‑से शुरुआती कदम उठाएंगे?",
-      "Imagine you have a small dataset with many features; what simple technique would you apply first to reduce dimensionality and why?",
-      "What simple check would you perform to ensure your training data doesn’t inadvertently contain information from the test set, and why is this important?",
-      "Imagine you have a regression problem with heteroscedastic errors; what simple preprocessing step could you apply to improve a linear model’s performance and why?",
-      "Suppose you notice that your model's predictions are systematically biased toward higher values; what quick diagnostic would you run to check for target leakage, and how would you address it?",
-      "Ek binary classifier ke output probabilities ko calibrate karne ke liye aap kaunse simple method ka use karenge, aur kyu?",
       "यदि आप K‑Nearest Neighbors मॉडल लागू कर रहे हैं, तो आप कौन‑सी स्केलिंग विधि चुनेंगे और उसका कारण क्या है?",
       "डेटा में categorical कॉलम को numeric में बदलते समय आप कौन‑सी सरल एन्कोडिंग चुनेंगे और क्यों?",
       "आपको एक डेटासेट में बहुत अधिक outliers मिलते हैं; मॉडल की स्थिरता बनाए रखने के लिए आप कौन‑सी शुरुआती कदम उठाएंगे?",
@@ -40,20 +33,20 @@
       "Aapko ek dataset milta hai jisme missing values hain, toh simple imputation ke liye kaunse method choose karenge aur kyun?",
       "Aapko ek dataset milta hai jisme features ka distribution skewed hai; simple model train karne se pehle aap kaunse transformation apply karenge aur kyun?",
       "जब आप k‑Nearest Neighbors मॉडल बनाते हैं, तो k का चयन कैसे करेंगे और उसका मॉडल की ज",
-      "k का चयन करने के लिए आप कौन‑सी वैधता तकनीक अपनाएंगे और उसके परिणाम कैसे व्याख्यायित करेंगे?"
+      "k का चयन करने के लिए आप कौन‑सी वैधता तकनीक अपनाएंगे और उसके परिणाम कैसे व्याख्यायित करेंगे?",
+      "How would you explain the bias‑variance trade‑off to a non‑technical stakeholder, and why is it important when selecting model complexity?",
+      "What is the purpose of a validation set and how does it",
+      "Can you describe what a hyperparameter is and give two examples of hyperparameters you would tune for a decision tree model?",
+      "Which metric would you choose to evaluate a multiclass classification model with imbalanced classes, and why is it more appropriate than simple accuracy?",
+      "Explain what a confusion matrix is and list its four components for a binary classification problem.",
+      "Besides cross‑entropy, which evaluation metric would you use for imbalanced multiclass data, and how would you validate its reliability?",
+      "Explain why one would use stratified sampling when creating train‑test splits for classification, and what effect it has on model evaluation."
     ],
     "interview": {
-      "role": "data scientist",
+      "role": "ML engineer",
       "track": "ML Fundamentals",
       "level": "Entry",
       "askedQuestions": [
-        "जब आपके डेटा में कई कॉलम में missing values हों, तो आप प्राथमिकता के आधार पर कौन‑से इम्प्यूटेशन तरीकों को चुनेंगे और क्यों?",
-        "यदि आप एक रैग्रेशन मॉडल बनाते हैं और उसका R² स्कोर 0.2 है, तो मॉडल को बेहतर बनाने के लिए आप कौन‑से शुरुआती कदम उठाएंगे?",
-        "Imagine you have a small dataset with many features; what simple technique would you apply first to reduce dimensionality and why?",
-        "What simple check would you perform to ensure your training data doesn’t inadvertently contain information from the test set, and why is this important?",
-        "Imagine you have a regression problem with heteroscedastic errors; what simple preprocessing step could you apply to improve a linear model’s performance and why?",
-        "Suppose you notice that your model's predictions are systematically biased toward higher values; what quick diagnostic would you run to check for target leakage, and how would you address it?",
-        "Ek binary classifier ke output probabilities ko calibrate karne ke liye aap kaunse simple method ka use karenge, aur kyu?",
         "यदि आप K‑Nearest Neighbors मॉडल लागू कर रहे हैं, तो आप कौन‑सी स्केलिंग विधि चुनेंगे और उसका कारण क्या है?",
         "डेटा में categorical कॉलम को numeric में बदलते समय आप कौन‑सी सरल एन्कोडिंग चुनेंगे और क्यों?",
         "आपको एक डेटासेट में बहुत अधिक outliers मिलते हैं; मॉडल की स्थिरता बनाए रखने के लिए आप कौन‑सी शुरुआती कदम उठाएंगे?",
@@ -86,11 +79,18 @@
         "Aapko ek dataset milta hai jisme missing values hain, toh simple imputation ke liye kaunse method choose karenge aur kyun?",
         "Aapko ek dataset milta hai jisme features ka distribution skewed hai; simple model train karne se pehle aap kaunse transformation apply karenge aur kyun?",
         "जब आप k‑Nearest Neighbors मॉडल बनाते हैं, तो k का चयन कैसे करेंगे और उसका मॉडल की ज",
-        "k का चयन करने के लिए आप कौन‑सी वैधता तकनीक अपनाएंगे और उसके परिणाम कैसे व्याख्यायित करेंगे?"
+        "k का चयन करने के लिए आप कौन‑सी वैधता तकनीक अपनाएंगे और उसके परिणाम कैसे व्याख्यायित करेंगे?",
+        "How would you explain the bias‑variance trade‑off to a non‑technical stakeholder, and why is it important when selecting model complexity?",
+        "What is the purpose of a validation set and how does it",
+        "Can you describe what a hyperparameter is and give two examples of hyperparameters you would tune for a decision tree model?",
+        "Which metric would you choose to evaluate a multiclass classification model with imbalanced classes, and why is it more appropriate than simple accuracy?",
+        "Explain what a confusion matrix is and list its four components for a binary classification problem.",
+        "Besides cross‑entropy, which evaluation metric would you use for imbalanced multiclass data, and how would you validate its reliability?",
+        "Explain why one would use stratified sampling when creating train‑test splits for classification, and what effect it has on model evaluation."
       ],
-      "lastQuestion": "k का चयन करने के लिए आप कौन‑सी वैधता तकनीक अपनाएंगे और उसके परिणाम कैसे व्याख्यायित करेंगे?",
-      "lastCandidateAnswer": "पता नहीं"
+      "lastQuestion": "Explain why one would use stratified sampling when creating train‑test splits for classification, and what effect it has on model evaluation.",
+      "lastCandidateAnswer": "Multiclass binary Cross entropy And It is used for the multi-class classification model And"
     },
-    "updatedAt": 1772256336056
+    "updatedAt": 1774246371379
   }
 }

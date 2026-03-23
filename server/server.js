@@ -400,6 +400,7 @@ async function requestUniqueQuestions({
   let generatedPool = [];
   let attempts = 0;
   let lastDetail = "";
+  let lastStatus = 0;
 
   while (accepted.length < count && attempts < GROQ_RETRY_LIMIT) {
     attempts += 1;
@@ -427,6 +428,7 @@ async function requestUniqueQuestions({
     });
 
     if (!response.ok) {
+      lastStatus = response.status;
       lastDetail = await response.text();
       if (response.status === 429 && attempts < GROQ_RETRY_LIMIT) {
         const retryAfterMs = parseRetryAfterMs(
@@ -472,11 +474,15 @@ async function requestUniqueQuestions({
     }
   }
 
-  return { questions: accepted.slice(0, count), lastDetail };
+  return { questions: accepted.slice(0, count), lastDetail, lastStatus };
 }
 
 function isRateLimited(detail) {
   return /\brate limit\b|\btoo many requests\b|\b429\b/i.test(String(detail || ""));
+}
+
+function isInvalidApiKeyDetail(detail, status = 0) {
+  return status === 401 || /\binvalid_api_key\b|\binvalid api key\b/i.test(String(detail || ""));
 }
 
 
@@ -722,7 +728,7 @@ app.post("/api/generate", async (req, res) => {
   });
 
   try {
-    const { questions, lastDetail } = await requestUniqueQuestions({
+    const { questions, lastDetail, lastStatus } = await requestUniqueQuestions({
       apiKey,
       model,
       systemPrompt,
@@ -733,6 +739,12 @@ app.post("/api/generate", async (req, res) => {
     });
 
     if (!questions.length) {
+      if (isInvalidApiKeyDetail(lastDetail, lastStatus)) {
+        return res.status(401).json({
+          error: "Invalid GROQ_API_KEY",
+          detail: "Groq rejected the configured API key for question generation.",
+        });
+      }
       const rateLimited = isRateLimited(lastDetail);
       return res.status(rateLimited ? 429 : 502).json({
         error: rateLimited ? "Groq rate limit exceeded" : "No unique questions returned from Groq",
@@ -794,7 +806,7 @@ app.post("/api/question/next", async (req, res) => {
     ]),
   ].slice(-60);
   try {
-    const { questions, lastDetail } = await requestUniqueQuestions({
+    const { questions, lastDetail, lastStatus } = await requestUniqueQuestions({
       apiKey,
       model,
       systemPrompt: buildInterviewerSystemPrompt({ level, language }),
@@ -812,6 +824,12 @@ app.post("/api/question/next", async (req, res) => {
     });
 
     if (!questions.length) {
+      if (isInvalidApiKeyDetail(lastDetail, lastStatus)) {
+        return res.status(401).json({
+          error: "Invalid GROQ_API_KEY",
+          detail: "Groq rejected the configured API key for question generation.",
+        });
+      }
       const rateLimited = isRateLimited(lastDetail);
       return res.status(rateLimited ? 429 : 502).json({
         error: rateLimited ? "Groq rate limit exceeded" : "No unique questions returned from Groq",
@@ -878,7 +896,7 @@ app.post("/api/question/followup", async (req, res) => {
   const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
   try {
-    const { questions, lastDetail } = await requestUniqueQuestions({
+    const { questions, lastDetail, lastStatus } = await requestUniqueQuestions({
       apiKey,
       model,
       systemPrompt: buildInterviewerSystemPrompt({ level, language }),
@@ -897,6 +915,12 @@ app.post("/api/question/followup", async (req, res) => {
     });
 
     if (!questions.length) {
+      if (isInvalidApiKeyDetail(lastDetail, lastStatus)) {
+        return res.status(401).json({
+          error: "Invalid GROQ_API_KEY",
+          detail: "Groq rejected the configured API key for follow-up generation.",
+        });
+      }
       const rateLimited = isRateLimited(lastDetail);
       return res.status(rateLimited ? 429 : 502).json({
         error: rateLimited ? "Groq rate limit exceeded" : "No follow-up question returned from Groq",
@@ -1181,7 +1205,11 @@ if (fs.existsSync(clientDistDir)) {
   });
 }
 
-app.listen(port, "0.0.0.0", () => {
-  console.log(`Server listening on port ${port}`);
-});
+if (process.env.VERCEL !== "1") {
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`Server listening on port ${port}`);
+  });
+}
+
+export default app;
 

@@ -7,6 +7,17 @@ const ANSWER_PAUSE_LIMIT_SECONDS = 5;
 const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 const apiPath = (endpoint) => `${API_BASE_URL}${endpoint}`;
 
+const parseApiErrorMessage = (rawText, fallback) => {
+  const text = String(rawText || "").trim();
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed.detail || parsed.error || fallback;
+  } catch {
+    return text;
+  }
+};
+
 export default function App() {
   const [questions, setQuestions] = useState([]);
   const [track, setTrack] = useState("");
@@ -743,14 +754,17 @@ export default function App() {
             body: JSON.stringify(payload),
           });
           if (!response.ok) {
-            const detail = await response.text();
+            const detail = parseApiErrorMessage(
+              await response.text(),
+              `Failed to generate (${response.status})`
+            );
             const retryable = response.status === 429 || response.status === 503 || response.status === 504;
             if (retryable && attempt < maxAttempts) {
               setSubmitState("Rate limited, retrying...");
               await waitFor(700 * attempt + Math.floor(Math.random() * 300));
               continue;
             }
-            const failure = new Error(detail || `Failed to generate (${response.status})`);
+            const failure = new Error(detail);
             failure.status = response.status;
             throw failure;
           }
@@ -803,7 +817,7 @@ export default function App() {
           ? "Rate limit hit. Please wait a few seconds and try again."
           : timedOut
           ? "Next question timed out. Please retry."
-          : "Could not generate questions. Check backend or API key."
+          : String(genError?.message || "Could not generate questions.")
       );
       setSubmitState("Next question failed");
     } finally {
